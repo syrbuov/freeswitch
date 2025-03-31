@@ -740,6 +740,8 @@ case "$host" in
         APR_REMOVEFROM(SWITCH_AM_CFLAGS, -fPIC)
         APR_ADDTO(CPPFLAGS, -I/usr/local/opt/openssl/include)
         APR_ADDTO(LDFLAGS, -L/usr/local/opt/openssl/lib)
+        APR_ADDTO(CPPFLAGS, -I/opt/homebrew/include)
+        APR_ADDTO(LDFLAGS, -L/opt/homebrew/lib)
         if test "x$enable_core_odbc_support" != "xno"; then
 	   APR_ADDTO([PLATFORM_CORE_LDFLAGS], [--framework CoreFoundation])
 	fi
@@ -838,6 +840,8 @@ AM_CONDITIONAL([SYSTEM_APR],[test "${use_system_apr}" = "yes"])
 
 save_LIBS="$LIBS"
 LIBS=
+
+AC_CHECK_HEADERS([jpeglib.h])
 AC_CHECK_LIB(jpeg, jpeg_std_error,, AC_MSG_ERROR([no usable libjpeg; please install libjpeg devel package or equivalent]))
 
 AC_CHECK_LIB(jbig, jbg_enc_out, have_libjbig=yes, have_libjbig=no)
@@ -1079,7 +1083,7 @@ if test "x${ax_cv_c_compiler_vendor}" = "xclang" ; then
 fi
 
 # Tested and fixed lot of modules, but some are untested.  Will be added back when the core team decide it ready
-# Untested modules : mod_osp mod_opal mod_h323 mod_khomp 
+# Untested modules : mod_osp mod_opal mod_h323
 #                    mod_erlang_event mod_snmp mod_perl mod_java mod_managed
 #
 #saved_CFLAGS="$CFLAGS"
@@ -1262,6 +1266,8 @@ case $host in
         path_push_unique PKG_CONFIG_PATH /usr/local/opt/sqlite/lib/pkgconfig/
         path_push_unique PKG_CONFIG_PATH /usr/local/opt/ldns/lib/pkgconfig/
         path_push_unique PKG_CONFIG_PATH /usr/local/opt/ffmpeg/lib/pkgconfig/
+        path_push_unique PKG_CONFIG_PATH /opt/homebrew/lib/pkgconfig/
+        path_push_unique PKG_CONFIG_PATH /opt/homebrew/opt/sqlite/lib/pkgconfig/
        ;;
 esac
 
@@ -1324,9 +1330,6 @@ PKG_CHECK_MODULES([SQLITE], [sqlite3 >= 3.6.20])
 PKG_CHECK_MODULES([CURL], [libcurl >= 7.19])
 PKG_CHECK_MODULES([PCRE], [libpcre >= 7.8])
 PKG_CHECK_MODULES([SPEEX], [speex >= 1.2rc1 speexdsp >= 1.2rc1])
-PKG_CHECK_MODULES([YAML], [yaml-0.1 >= 0.1.4],[
-  AM_CONDITIONAL([HAVE_YAML],[true])],[
-  AC_MSG_RESULT([no]); AM_CONDITIONAL([HAVE_YAML],[false])])
 PKG_CHECK_MODULES([LDNS], [libldns-fs >= 1.6.6],[
   AM_CONDITIONAL([HAVE_LDNS],[true])],[
 PKG_CHECK_MODULES([LDNS], [libldns >= 1.6.6],[
@@ -2115,19 +2118,14 @@ AC_CONFIG_FILES([Makefile
 		src/mod/applications/mod_memcache/Makefile
 		src/mod/applications/mod_mongo/Makefile
 		src/mod/applications/mod_nibblebill/Makefile
-		src/mod/applications/mod_oreka/Makefile
 		src/mod/applications/mod_osp/Makefile
 		src/mod/applications/mod_prefix/Makefile
-		src/mod/applications/mod_rad_auth/Makefile
 		src/mod/applications/mod_random/Makefile
 		src/mod/applications/mod_redis/Makefile
-		src/mod/applications/mod_rss/Makefile
 		src/mod/applications/mod_skel/Makefile
 		src/mod/applications/mod_signalwire/Makefile
 		src/mod/applications/mod_sms/Makefile
 		src/mod/applications/mod_snapshot/Makefile
-		src/mod/applications/mod_snom/Makefile
-		src/mod/applications/mod_sonar/Makefile
 		src/mod/applications/mod_spandsp/Makefile
 		src/mod/applications/mod_spy/Makefile
 		src/mod/applications/mod_test/Makefile
@@ -2143,19 +2141,16 @@ AC_CONFIG_FILES([Makefile
 		src/mod/codecs/mod_amrwb/Makefile
 		src/mod/codecs/mod_b64/Makefile
 		src/mod/codecs/mod_bv/Makefile
-		src/mod/codecs/mod_clearmode/Makefile
 		src/mod/codecs/mod_codec2/Makefile
 		src/mod/codecs/mod_com_g729/Makefile
 		src/mod/codecs/mod_g723_1/Makefile
 		src/mod/codecs/mod_g729/Makefile
-		src/mod/codecs/mod_h26x/Makefile
 		src/mod/codecs/mod_ilbc/Makefile
 		src/mod/codecs/mod_opus/Makefile
 		src/mod/codecs/mod_openh264/Makefile
 		src/mod/codecs/mod_silk/Makefile
 		src/mod/codecs/mod_siren/Makefile
 		src/mod/codecs/mod_skel_codec/Makefile
-		src/mod/codecs/mod_theora/Makefile
 		src/mod/databases/mod_mariadb/Makefile
 		src/mod/databases/mod_pgsql/Makefile
 		src/mod/dialplans/mod_dialplan_asterisk/Makefile
@@ -2164,7 +2159,6 @@ AC_CONFIG_FILES([Makefile
 		src/mod/directories/mod_ldap/Makefile
 		src/mod/endpoints/mod_alsa/Makefile
 		src/mod/endpoints/mod_h323/Makefile
-		src/mod/endpoints/mod_khomp/Makefile
 		src/mod/endpoints/mod_loopback/Makefile
 		src/mod/endpoints/mod_opal/Makefile
 		src/mod/endpoints/mod_reference/Makefile
@@ -2185,11 +2179,9 @@ AC_CONFIG_FILES([Makefile
 		src/mod/event_handlers/mod_fail2ban/Makefile
 		src/mod/event_handlers/mod_format_cdr/Makefile
 		src/mod/event_handlers/mod_json_cdr/Makefile
-		src/mod/event_handlers/mod_radius_cdr/Makefile
 		src/mod/event_handlers/mod_odbc_cdr/Makefile
 		src/mod/event_handlers/mod_smpp/Makefile
 		src/mod/event_handlers/mod_snmp/Makefile
-		src/mod/event_handlers/mod_event_zmq/Makefile
 		src/mod/formats/mod_imagick/Makefile
 		src/mod/formats/mod_local_stream/Makefile
 		src/mod/formats/mod_native_file/Makefile
@@ -2207,13 +2199,11 @@ AC_CONFIG_FILES([Makefile
 		src/mod/languages/mod_python/Makefile
 		src/mod/languages/mod_python3/Makefile
 		src/mod/languages/mod_v8/Makefile
-		src/mod/languages/mod_yaml/Makefile
 		src/mod/languages/mod_basic/Makefile
 		src/mod/loggers/mod_console/Makefile
 		src/mod/loggers/mod_graylog2/Makefile
 		src/mod/loggers/mod_logfile/Makefile
 		src/mod/loggers/mod_syslog/Makefile
-		src/mod/loggers/mod_raven/Makefile
 		src/mod/say/mod_say_de/Makefile
 		src/mod/say/mod_say_en/Makefile
 		src/mod/say/mod_say_es/Makefile
@@ -2237,7 +2227,6 @@ AC_CONFIG_FILES([Makefile
 		src/mod/xml_int/mod_xml_cdr/Makefile
 		src/mod/xml_int/mod_xml_curl/Makefile
 		src/mod/xml_int/mod_xml_ldap/Makefile
-		src/mod/xml_int/mod_xml_radius/Makefile
 		src/mod/xml_int/mod_xml_rpc/Makefile
 		src/mod/xml_int/mod_xml_scgi/Makefile
 		src/mod/applications/mod_av/Makefile
