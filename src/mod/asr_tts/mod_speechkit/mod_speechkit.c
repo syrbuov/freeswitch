@@ -281,7 +281,7 @@ static switch_status_t speechkit_asr_feed(switch_asr_handle_t *ah, void *data, u
 		int rlen;
 
 		rlen = switch_buffer_read(speechkit->audio_buffer, buf, AUDIO_BLOCK_SIZE);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sending data %d\n", rlen);
+		// switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Sending data %d\n", rlen);
 		if (kws_write_frame(speechkit->ws, WSOC_BINARY, buf, rlen) < 0) {
 			switch_mutex_unlock(speechkit->mutex);
 			return SWITCH_STATUS_BREAK;
@@ -305,7 +305,7 @@ static switch_status_t speechkit_asr_feed(switch_asr_handle_t *ah, void *data, u
 		return SWITCH_STATUS_SUCCESS;
 	}
 
-	// switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Recieved %d bytes:\n%s\n", rlen, rdata);
+	// switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received %d bytes:\n%s\n", rlen, rdata);
 	switch_safe_free(speechkit->result);
 	speechkit->result = switch_safe_strdup((const char *)rdata);
 	switch_mutex_unlock(speechkit->mutex);
@@ -432,6 +432,7 @@ static switch_status_t load_config(void)
 				globals.asr_return_json = atoi(val);
 			}
 		}
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "ASR-TTS-URLs: %s %s\n", globals.asr_server_url, globals.tts_server_url);
 	}
 
   done:
