@@ -8,7 +8,7 @@ applications/mod_av
 #applications/mod_cluechoo
 applications/mod_commands
 applications/mod_conference
-#applications/mod_curl
+applications/mod_curl
 #applications/mod_cv
 applications/mod_db
 #applications/mod_directory
@@ -26,6 +26,7 @@ applications/mod_hash
 #applications/mod_hiredis
 applications/mod_httapi
 applications/mod_http_cache
+#applications/mod_ladspa
 #applications/mod_lcr
 #applications/mod_memcache
 #applications/mod_mongo
@@ -47,7 +48,6 @@ applications/mod_sms
 #applications/mod_soundtouch
 applications/mod_spandsp
 #applications/mod_spy
-#applications/mod_stress
 applications/mod_test
 #applications/mod_translate
 applications/mod_valet_parking
@@ -55,10 +55,10 @@ applications/mod_valet_parking
 #applications/mod_vmd
 applications/mod_voicemail
 #applications/mod_voicemail_ivr
-#asr_tts/mod_cepstral
 #asr_tts/mod_flite
 #asr_tts/mod_pocketsphinx
 #asr_tts/mod_tts_commandline
+#asr_tts/mod_unimrcp
 asr_tts/mod_speechkit
 codecs/mod_amr
 #codecs/mod_amrwb
@@ -86,7 +86,6 @@ dialplans/mod_dialplan_asterisk
 dialplans/mod_dialplan_xml
 #directories/mod_ldap
 #endpoints/mod_alsa
-#endpoints/mod_gsmopen
 #endpoints/mod_h323
 #endpoints/mod_khomp
 endpoints/mod_loopback
@@ -100,7 +99,7 @@ endpoints/mod_verto
 #event_handlers/mod_amqp
 event_handlers/mod_cdr_csv
 #event_handlers/mod_cdr_mongodb
-#event_handlers/mod_cdr_pg_csv
+event_handlers/mod_cdr_pg_csv
 event_handlers/mod_cdr_sqlite
 #event_handlers/mod_erlang_event
 #event_handlers/mod_event_multicast
@@ -110,7 +109,6 @@ event_handlers/mod_event_socket
 #event_handlers/mod_json_cdr
 #event_handlers/mod_radius_cdr
 #event_handlers/mod_odbc_cdr
-#event_handlers/mod_rayo
 #event_handlers/mod_smpp
 #event_handlers/mod_snmp
 #event_handlers/mod_event_zmq
@@ -120,7 +118,7 @@ formats/mod_native_file
 formats/mod_png
 #formats/mod_portaudio_stream
 #formats/mod_shell_stream
-#formats/mod_shout
+formats/mod_shout
 formats/mod_sndfile
 #formats/mod_ssml
 formats/mod_tone_stream
@@ -132,7 +130,7 @@ languages/mod_lua
 #languages/mod_managed
 #languages/mod_perl
 #languages/mod_python
-#languages/mod_python3
+					  
 #languages/mod_v8
 #languages/mod_yaml
 loggers/mod_console
