@@ -38,7 +38,8 @@
 #include <libks/ks.h>
 
 
-#define AUDIO_BLOCK_SIZE 3200
+int audio_block_size = 3200;
+#define AUDIO_BLOCK_SIZE audio_block_size
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_speechkit_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_speechkit_shutdown);
@@ -354,7 +355,7 @@ static switch_status_t speechkit_asr_get_results(switch_asr_handle_t *ah, char *
 
 	switch_mutex_lock(speechkit->mutex);
 	if (globals.asr_return_json) {
-		if  (strstr(speechkit->result, "\"partial\"") == NULL) {
+		if  (strstr(speechkit->result, "\"text\"") != NULL) {
 			*xmlstr = switch_safe_strdup(speechkit->result);
 			ret = SWITCH_STATUS_SUCCESS;
 		} else {
@@ -430,6 +431,9 @@ static switch_status_t load_config(void)
 			}
 			if (!strcasecmp(var, "asr-return-json")) {
 				globals.asr_return_json = atoi(val);
+			}
+			if (!strcasecmp(var, "asr-audio-block-size")) {
+				audio_block_size = atoi(val);
 			}
 		}
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "ASR-TTS-URLs: %s %s\n", globals.asr_server_url, globals.tts_server_url);
