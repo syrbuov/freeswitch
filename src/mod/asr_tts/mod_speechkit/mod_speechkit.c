@@ -139,7 +139,7 @@ static switch_status_t speechkit_speech_feed_tts(switch_speech_handle_t *sh, cha
 	}
 
 
-	kws_write_frame(speechkit->ws, WSOC_TEXT, ks_json_print(tts_data), strlen(ks_json_print(tts_data)));
+	kws_write_frame(speechkit->ws, WSOC_TEXT, ks_json_print_unformatted(tts_data), strlen(ks_json_print_unformatted(tts_data)));
 
 	ks_json_delete(&tts_data);
 
@@ -273,6 +273,12 @@ static switch_status_t speechkit_asr_feed(switch_asr_handle_t *ah, void *data, u
 
 	if (switch_test_flag(ah, SWITCH_ASR_FLAG_CLOSED))
 		return SWITCH_STATUS_BREAK;
+
+	if (speechkit->asr_params){
+		kws_write_frame(speechkit->ws, WSOC_TEXT, ks_json_print_unformatted(speechkit->asr_params), strlen(ks_json_print_unformatted(speechkit->asr_params)));
+		ks_json_delete(&speechkit->asr_params);
+		switch_safe_free(speechkit->asr_params);
+	}
 
 	switch_mutex_lock(speechkit->mutex);
 
