@@ -5089,13 +5089,14 @@ static void *SWITCH_THREAD_FUNC speech_thread(switch_thread_t *thread, void *obj
 				}
 
 				if (switch_test_flag(sth->ah, SWITCH_ASR_FLAG_FIRE_EVENTS)) {
-					switch_event_t *dup;
+					if (switch_true(switch_channel_get_variable(channel, "fire_asr_events"))) {
+						switch_event_t *dup;
 
-					if (switch_event_dup(&dup, event) == SWITCH_STATUS_SUCCESS) {
-						switch_channel_event_set_data(channel, dup);
-						switch_event_fire(&dup);
+						if (switch_event_dup(&dup, event) == SWITCH_STATUS_SUCCESS) {
+							switch_channel_event_set_data(channel, dup);
+							switch_event_fire(&dup);
+						}	
 					}
-
 				}
 
 				if (switch_core_session_queue_event(sth->session, &event) != SWITCH_STATUS_SUCCESS) {
