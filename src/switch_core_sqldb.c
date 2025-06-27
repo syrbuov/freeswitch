@@ -2450,13 +2450,27 @@ static void core_event_handler(switch_event_t *event)
 		{
 			const char *uuid = switch_event_get_header(event, "unique-id");
 
-			if (uuid) {
-				new_sql() = switch_mprintf("delete from channels where uuid='%q'",
-										   uuid);
+			if (switch_true(switch_event_get_header(event, "variable_clear_channel"))) {
+				/* This is for clearing a channel with the uuid_clear api command */
+				const char *hostname = switch_event_get_header(event, "FreeSWITCH-Switchname");
+				
+				if (uuid) {
+					new_sql() = switch_mprintf("delete from channels where (uuid='%q' and hostname='%q')",
+											uuid, hostname);
 
-				new_sql() = switch_mprintf("delete from calls where (caller_uuid='%q' or callee_uuid='%q')",
-										   uuid, uuid);
+					new_sql() = switch_mprintf("delete from calls where ((caller_uuid='%q' or callee_uuid='%q') and hostname='%q')",
+											uuid, uuid, hostname);
 
+				}
+			} else {
+				if (uuid) {
+					new_sql() = switch_mprintf("delete from channels where uuid='%q'",
+											uuid);
+
+					new_sql() = switch_mprintf("delete from calls where (caller_uuid='%q' or callee_uuid='%q')",
+											uuid, uuid);
+
+				}
 			}
 		}
 		break;
@@ -3267,7 +3281,7 @@ static int recover_callback(void *pArg, int argc, char **argv, char **columnName
 	return 0;
 }
 
-SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const char *profile_name)
+SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const char *profile_name, char *mode, char *value)
 
 {
 	char *sql = NULL;
@@ -3285,31 +3299,42 @@ SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const c
 		return 0;
 	}
 
-	if (zstr(technology)) {
-
-		if (zstr(profile_name)) {
+	if (mode && value) {
+		if (!strcasecmp(mode, "uuid")) {
 			sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
-								 "from recovery where runtime_uuid!='%q'",
-								 switch_core_get_uuid());
-		} else {
+									"from recovery where runtime_uuid!='%q' and uuid='%q'",
+									switch_core_get_uuid(), value);			
+		} else if (!strcasecmp(mode, "hostname")) {
 			sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
-								 "from recovery where runtime_uuid!='%q' and profile_name='%q'",
-								 switch_core_get_uuid(), profile_name);
+									"from recovery where runtime_uuid!='%q' and hostname='%q'",
+									switch_core_get_uuid(), value);
 		}
-
 	} else {
+		if (zstr(technology)) {
 
-		if (zstr(profile_name)) {
-			sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
-								 "from recovery where technology='%q' and runtime_uuid!='%q'",
-								 technology, switch_core_get_uuid());
+			if (zstr(profile_name)) {
+				sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
+									"from recovery where runtime_uuid!='%q'",
+									switch_core_get_uuid());
+			} else {
+				sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
+									"from recovery where runtime_uuid!='%q' and profile_name='%q'",
+									switch_core_get_uuid(), profile_name);
+			}
+
 		} else {
-			sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
-								 "from recovery where technology='%q' and runtime_uuid!='%q' and profile_name='%q'",
-								 technology, switch_core_get_uuid(), profile_name);
+
+			if (zstr(profile_name)) {
+				sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
+									"from recovery where technology='%q' and runtime_uuid!='%q'",
+									technology, switch_core_get_uuid());
+			} else {
+				sql = switch_mprintf("select technology, profile_name, hostname, uuid, metadata "
+									"from recovery where technology='%q' and runtime_uuid!='%q' and profile_name='%q'",
+									technology, switch_core_get_uuid(), profile_name);
+			}
 		}
 	}
-
 
 	switch_cache_db_execute_sql_callback(dbh, sql, recover_callback, &r, &errmsg);
 
@@ -3320,21 +3345,30 @@ SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const c
 
 	switch_safe_free(sql);
 
-	if (zstr(technology)) {
-		if (zstr(profile_name)) {
-			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q'",
-								 switch_core_get_uuid());
-		} else {
-			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and profile_name='%q'",
-								 switch_core_get_uuid(), profile_name);
+	if (mode && value) {
+		if (!strcasecmp(mode, "uuid")) {
+			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and uuid='%q' ",
+									 switch_core_get_uuid(), value);
+		} else if (!strcasecmp(mode, "hostname")) {
+			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and hostname='%q' ",
+									 switch_core_get_uuid(), value);
 		}
 	} else {
-		if (zstr(profile_name)) {
-			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and technology='%q' ",
-								 switch_core_get_uuid(), technology);
+		if (zstr(technology)) {
+			if (zstr(profile_name)) {
+				sql = switch_mprintf("delete from recovery where runtime_uuid!='%q'", switch_core_get_uuid());
+			} else {
+				sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and profile_name='%q'",
+									 switch_core_get_uuid(), profile_name);
+			}
 		} else {
-			sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and technology='%q' and profile_name='%q'",
-								 switch_core_get_uuid(), technology, profile_name);
+			if (zstr(profile_name)) {
+				sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and technology='%q' ",
+									 switch_core_get_uuid(), technology);
+			} else {
+				sql = switch_mprintf("delete from recovery where runtime_uuid!='%q' and technology='%q' and profile_name='%q'",
+									switch_core_get_uuid(), technology, profile_name);
+			}
 		}
 	}
 
@@ -3397,7 +3431,7 @@ SWITCH_DECLARE(void) switch_core_recovery_untrack(switch_core_session_t *session
 
 	if (switch_channel_test_flag(channel, CF_TRACKED) || force) {
 
-		if (force) {
+		if (force && !switch_true(switch_channel_get_variable(channel, "clear_channel"))) {
 			sql = switch_mprintf("delete from recovery where uuid='%q'", switch_core_session_get_uuid(session));
 
 		} else {

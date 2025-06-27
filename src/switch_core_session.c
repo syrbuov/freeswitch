@@ -2157,6 +2157,7 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_xml(switch_e
 	uint32_t caps[CC_FLAG_MAX] = { 0 };
 	int i;
 
+	const char* recovered_switchname = switch_xml_attr(xml, "switchname");
 	vars = switch_xml_child(xml, "variables");
 	uuid = xml_find_var(vars, "uuid");
 
@@ -2263,6 +2264,7 @@ SWITCH_DECLARE(switch_core_session_t *) switch_core_session_request_xml(switch_e
 				free(p);
 			}
 		}
+		switch_channel_set_variable(channel, "recovered_from_switchname", recovered_switchname);
 	}
 
 	if ((callflow = switch_xml_child(xml, "callflow"))) {

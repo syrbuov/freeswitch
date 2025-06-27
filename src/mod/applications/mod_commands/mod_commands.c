@@ -2877,6 +2877,34 @@ SWITCH_STANDARD_API(kill_function)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+#define CLEAR_SYNTAX "<uuid> [cause]"
+SWITCH_STANDARD_API(clear_function)
+{
+	char *mycmd = NULL, *kcause = NULL;
+	switch_call_cause_t cause = SWITCH_CAUSE_NORMAL_CLEARING;
+
+	if (zstr(cmd) || !(mycmd = strdup(cmd))) {
+		stream->write_function(stream, "-USAGE: %s\n", CLEAR_SYNTAX);
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if ((kcause = strchr(mycmd, ' '))) {
+		*kcause++ = '\0';
+		if (!zstr(kcause)) {
+			cause = switch_channel_str2cause(kcause);
+		}
+	}
+
+	if (switch_ivr_clear_uuid(mycmd, cause) != SWITCH_STATUS_SUCCESS) {
+		stream->write_function(stream, "-ERR No such channel!\n");
+	} else {
+		stream->write_function(stream, "+OK\n");
+	}
+
+	switch_safe_free(mycmd);
+	return SWITCH_STATUS_SUCCESS;
+}
+
 #define OUTGOING_ANSWER_SYNTAX "<uuid>"
 SWITCH_STANDARD_API(outgoing_answer_function)
 {
@@ -3584,6 +3612,30 @@ SWITCH_STANDARD_API(uuid_recovery_refresh)
 	}
 
 	switch_safe_free(uuid);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+#define UUID_RECOVERY_SYNTAX "<uuid>"
+SWITCH_STANDARD_API(uuid_recovery)
+{
+	char *mycmd = NULL, *argv[2] = { 0 };
+	int argc = 0;
+	char *uuid = NULL;
+	
+
+	if (!zstr(cmd) && (mycmd= strdup(cmd))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+		if (argc >= 0 && !zstr(argv[0])) {
+				uuid = argv[0];
+				printf("Entered UUID %s", uuid);
+			}
+	}
+
+	if (zstr(uuid)) {
+		stream->write_function(stream, "-USAGE: %s\n", UUID_RECOVERY_SYNTAX);
+	} else {
+		stream->write_function(stream, "Entered UUID: %s\n", uuid);
+	}
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -4705,6 +4757,32 @@ SWITCH_STANDARD_API(uuid_bridge_function)
 	} else {
 		switch_status_t status;
 		char *who = NULL;
+
+		switch_bool_t originator_session = switch_ivr_uuid_exists(argv[0]);
+		switch_bool_t originatee_session = switch_ivr_uuid_exists(argv[1]);
+
+		if (originator_session && !originatee_session) {
+			char* recover_args = switch_mprintf("recover uuid %s",argv[1]);
+			if((status = switch_api_execute("sofia", recover_args, NULL, stream)) != SWITCH_STATUS_SUCCESS) {
+				stream->write_function(stream, "-ERR Invalid uuid. Failed to recover originatee uuid\n");
+			}
+		} else if (!originator_session && originatee_session) {
+			char* recover_args = switch_mprintf("recover uuid %s",argv[1]);
+			if((status = switch_api_execute("sofia", recover_args, NULL, stream)) != SWITCH_STATUS_SUCCESS) {
+				stream->write_function(stream, "-ERR Invalid uuid. Failed to recover originator uuid\n");
+			}
+		} else if (!originator_session && !originatee_session) {
+			char* recover_args_originator = switch_mprintf("recover uuid %s",argv[0]);
+			char* recover_args_originatee = switch_mprintf("recover uuid %s",argv[1]);
+
+			if((status = switch_api_execute("sofia", recover_args_originator, NULL, stream)) != SWITCH_STATUS_SUCCESS) {
+				stream->write_function(stream, "-ERR Invalid uuid. Failed to recover originator uuid\n");
+			} else {
+				if((status = switch_api_execute("sofia", recover_args_originatee, NULL, stream)) != SWITCH_STATUS_SUCCESS) {
+					stream->write_function(stream, "-ERR Invalid uuid. Failed to recover originatee uuid\n");
+				}
+			}
+		}
 
 		if ((status = switch_ivr_uuid_bridge(argv[0], argv[1])) != SWITCH_STATUS_SUCCESS) {
 			if (argv[2]) {
@@ -7695,6 +7773,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	SWITCH_ADD_API(commands_api_interface, "uuid_getvar", "Get a variable from a channel", uuid_getvar_function, GETVAR_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_hold", "Place call on hold", uuid_hold_function, HOLD_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_kill", "Kill channel", kill_function, KILL_SYNTAX);
+	SWITCH_ADD_API(commands_api_interface, "uuid_clear", "Clear channel", clear_function, CLEAR_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_send_message", "Send MESSAGE to the endpoint", uuid_send_message_function, SEND_MESSAGE_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_send_info", "Send info to the endpoint", uuid_send_info_function, INFO_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_set_media_stats", "Set media stats", uuid_set_media_stats, UUID_MEDIA_STATS_SYNTAX);
@@ -7716,6 +7795,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	SWITCH_ADD_API(commands_api_interface, "uuid_preprocess", "Pre-process Channel", preprocess_function, PREPROCESS_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_record", "Record session audio", session_record_function, SESS_REC_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_recovery_refresh", "Send a recovery_refresh", uuid_recovery_refresh, UUID_RECOVERY_REFRESH_SYNTAX);
+	SWITCH_ADD_API(commands_api_interface, "uuid_recovery", "Recover uuid from other node", uuid_recovery, UUID_RECOVERY_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_recv_dtmf", "Receive dtmf digits", uuid_recv_dtmf_function, UUID_RECV_DTMF_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_redirect", "Send a redirect", uuid_redirect, UUID_REDIRECT_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_send_dtmf", "Send dtmf digits", uuid_send_dtmf_function, UUID_SEND_DTMF_SYNTAX);
@@ -7898,6 +7978,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	switch_console_set_complete("add uuid_send_info ::console::list_uuid");
 	switch_console_set_complete("add uuid_jitterbuffer ::console::list_uuid");
 	switch_console_set_complete("add uuid_kill ::console::list_uuid");
+	switch_console_set_complete("add uuid_clear ::console::list_uuid");
 	switch_console_set_complete("add uuid_outgoing_answer ::console::list_uuid");
 	switch_console_set_complete("add uuid_limit ::console::list_uuid");
 	switch_console_set_complete("add uuid_limit_release ::console::list_uuid");

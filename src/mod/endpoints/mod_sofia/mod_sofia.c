@@ -56,7 +56,7 @@ switch_endpoint_interface_t *sofia_endpoint_interface;
 
 void mod_sofia_shutdown_cleanup(void);
 static switch_status_t sofia_on_init(switch_core_session_t *session);
-
+static void sofia_recovery_result(int x, switch_event_t *event, switch_stream_handle_t *stream);
 static switch_status_t sofia_on_exchange_media(switch_core_session_t *session);
 static switch_status_t sofia_on_soft_execute(switch_core_session_t *session);
 static switch_status_t sofia_acknowledge_call(switch_core_session_t *session);
@@ -522,7 +522,8 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 			}
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Sending BYE to %s\n", switch_channel_get_name(channel));
 			if (!sofia_test_flag(tech_pvt, TFLAG_BYE)) {
-				nua_bye(tech_pvt->nh,
+				if (!switch_true(switch_channel_get_variable(channel, "clear_channel"))) {
+					nua_bye(tech_pvt->nh,
 				        TAG_IF(!zstr(tech_pvt->route_uri), NUTAG_PROXY(tech_pvt->route_uri)),
 						SIPTAG_CONTACT(SIP_NONE),
 						TAG_IF(!zstr(reason), SIPTAG_REASON_STR(reason)),
@@ -531,6 +532,7 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 						TAG_IF(!zstr(bye_headers), SIPTAG_HEADER_STR(bye_headers)),
 						TAG_IF(!zstr(session_id_header), SIPTAG_HEADER_STR(session_id_header)),
 						TAG_END());
+				}
 			}
 		} else {
 			if (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_OUTBOUND) {
@@ -3648,11 +3650,11 @@ static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t
 
 	if (!strcasecmp(argv[1], "recover")) {
 		if (argv[2] && !strcasecmp(argv[2], "flush")) {
-			sofia_glue_profile_recover(profile, SWITCH_TRUE);
+			sofia_glue_profile_recover(profile, argv[2], NULL);
 
 			stream->write_function(stream, "Flushing recovery database.\n");
 		} else {
-			int x = sofia_glue_profile_recover(profile, SWITCH_FALSE);
+			int x = sofia_glue_profile_recover(profile, NULL, NULL);
 			if (x) {
 				stream->write_function(stream, "Recovered %d session(s)\n", x);
 			} else {
@@ -4594,30 +4596,67 @@ SWITCH_STANDARD_API(sofia_function)
 		goto done;
 
 	} else if (!strcasecmp(argv[0], "recover")) {
-		if (argv[1] && !strcasecmp(argv[1], "flush")) {
-			sofia_glue_recover(SWITCH_TRUE);
-			stream->write_function(stream, "Flushing recovery database.\n");
-		} else {
-			int x = sofia_glue_recover(SWITCH_FALSE);
-			switch_event_t *event = NULL;
+		if (argc > 1) {
+			if (argv[1] && !strcmp(argv[1], "flush")) {
+				sofia_glue_recover(argv[1], NULL);
+				stream->write_function(stream, "Flushing recovery database.\n");
+			} else if (argv[1] && !strcmp(argv[1], "hostname")) {
+				int x = sofia_glue_recover(argv[1], argv[2]);
+				switch_event_t *event = NULL;
+				sofia_recovery_result(x, event, stream);
+			} else if (argv[1] && !strcmp(argv[1], "uuid")) {
+				int x = sofia_glue_recover(argv[1], argv[2]);
+				switch_event_t *event = NULL;
+				if (x) {
+					if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_RECOVERY_RECOVERED) ==
+						SWITCH_STATUS_SUCCESS) {
+						switch_event_add_header(event, SWITCH_STACK_BOTTOM, "recovered_uuid", "%s", argv[2]);
+						switch_event_add_header(event, SWITCH_STACK_BOTTOM, "recovered_calls", "%d", x);
+						if ((session = switch_core_session_locate(argv[2])))
+						{
+							switch_channel_t* channel = switch_core_session_get_channel(session);
+							const char* val = switch_channel_get_variable(channel, "recovered_from_switchname");
+							// switch_channel_clear_flag(channel, CF_BRIDGE_ORIGINATOR);							
+							switch_event_add_header(event, SWITCH_STACK_BOTTOM, "recovered_from_switchname", "%s", val);
+							switch_channel_event_set_data(channel, event);
+							switch_core_session_rwunlock(session);
 
-			if (x) {
-				if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM,
-					MY_EVENT_RECOVERY_RECOVERED) == SWITCH_STATUS_SUCCESS) {
-					switch_event_add_header(event, SWITCH_STACK_BOTTOM, "recovered_calls", "%d", x);
-					switch_event_fire(&event);
+							if (argv[3])
+							{
+								char* vars = argv[3];
+								char *vars_arr[64] = { 0 };
+								int vars_num = 0;
+								char *var_name, *var_value = NULL;
+								int x, y = 0;
+								vars_num = switch_separate_string(vars, ';', vars_arr, (sizeof(vars_arr) / sizeof(vars_arr[0])));
+								for (x = 0; x < vars_num; x++) {
+									var_name = vars_arr[x];
+									if (var_name && (var_value = strchr(var_name, '='))) {
+										*var_value++ = '\0';
+									}
+									if (zstr(var_name)) {
+										switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "No variable name specified.\n");
+										stream->write_function(stream, "-ERR No variable specified\n");
+									} else {
+										switch_event_add_header_string(event, SWITCH_STACK_BOTTOM,var_name,var_value);
+										y++;
+									}
+								}
+							}
+
+						}
+						switch_event_fire(&event);
+					}
+			
+					stream->write_function(stream, "Recovered %d call(s)\n", x);
+				} else {
+					sofia_recovery_result(x, event, stream);
 				}
-
-				stream->write_function(stream, "Recovered %d call(s)\n", x);
-			} else {
-				if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM,
-					MY_EVENT_RECOVERY_RECOVERED) == SWITCH_STATUS_SUCCESS) {
-					switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "recovered_calls", "0");
-					switch_event_fire(&event);
-				}
-
-				stream->write_function(stream, "No calls to recover.\n");
 			}
+		} else {
+			int x = sofia_glue_recover(NULL, NULL);
+			switch_event_t *event = NULL;
+			sofia_recovery_result(x, event, stream);
 		}
 
 		goto done;
@@ -4632,6 +4671,27 @@ SWITCH_STANDARD_API(sofia_function)
   done:
 	switch_safe_free(mycmd);
 	return status;
+}
+
+static void sofia_recovery_result(int x, switch_event_t *event, switch_stream_handle_t *stream)
+{
+	if (x) {
+		if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_RECOVERY_RECOVERED) ==
+			SWITCH_STATUS_SUCCESS) {
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "recovered_calls", "%d", x);
+			switch_event_fire(&event);
+		}
+
+		stream->write_function(stream, "Recovered %d call(s)\n", x);
+	} else {
+		if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_RECOVERY_RECOVERED) ==
+			SWITCH_STATUS_SUCCESS) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "recovered_calls", "0");
+			switch_event_fire(&event);
+		}
+
+		stream->write_function(stream, "No calls to recover.\n");
+	}
 }
 
 switch_io_routines_t sofia_io_routines = {
@@ -6810,6 +6870,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	switch_console_set_complete("add sofia profile ::sofia::list_profiles gwlist ::[up:down");
 
 	switch_console_set_complete("add sofia recover flush");
+	switch_console_set_complete("add sofia recover uuid");
+	switch_console_set_complete("add sofia recover hostname");
 
 	switch_console_set_complete("add sofia xmlstatus profile ::sofia::list_profiles reg");
 	switch_console_set_complete("add sofia xmlstatus gateway ::sofia::list_gateways");

@@ -2992,20 +2992,20 @@ void *SWITCH_THREAD_FUNC sofia_profile_worker_thread_run(switch_thread_t *thread
 
 			if (!sofia_test_pflag(profile, PFLAG_STANDBY)) {
 				if (++ireg_loops >= (uint32_t)profile->ireg_seconds) {
-					time_t now = switch_epoch_time_now(NULL);
-					sofia_reg_check_expire(profile, now, 0);
+					// time_t now = switch_epoch_time_now(NULL);
+					// sofia_reg_check_expire(profile, now, 0);
 					ireg_loops = 0;
 				}
 
 				if(++iping_loops >= (uint32_t)profile->iping_freq) {
-					time_t now = switch_epoch_time_now(NULL);
-					sofia_reg_check_ping_expire(profile, now, profile->iping_seconds);
+					// time_t now = switch_epoch_time_now(NULL);
+					// sofia_reg_check_ping_expire(profile, now, profile->iping_seconds);
 					iping_loops = 0;
 				}
 
 				if (++gateway_loops >= GATEWAY_SECONDS) {
-					sofia_reg_check_gateway(profile, switch_epoch_time_now(NULL));
-					sofia_sub_check_gateway(profile, switch_epoch_time_now(NULL));
+					// sofia_reg_check_gateway(profile, switch_epoch_time_now(NULL));
+					// sofia_sub_check_gateway(profile, switch_epoch_time_now(NULL));
 					gateway_loops = 0;
 				}
 			}
@@ -8842,7 +8842,7 @@ void *SWITCH_THREAD_FUNC nightmare_xfer_thread_run(switch_thread_t *thread, void
 	return NULL;
 }
 
-static void launch_nightmare_xfer(nightmare_xfer_helper_t *nhelper)
+/* static void launch_nightmare_xfer(nightmare_xfer_helper_t *nhelper)
 {
 	switch_thread_t *thread;
 	switch_threadattr_t *thd_attr = NULL;
@@ -8851,7 +8851,7 @@ static void launch_nightmare_xfer(nightmare_xfer_helper_t *nhelper)
 	switch_threadattr_detach_set(thd_attr, 1);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
 	switch_thread_create(&thread, thd_attr, nightmare_xfer_thread_run, nhelper, nhelper->pool);
-}
+} */
 
 /*---------------------------------------*/
 
@@ -9577,6 +9577,7 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 							}
 
 							if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MY_EVENT_TRANSFEREE) == SWITCH_STATUS_SUCCESS) {
+								switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "att_xfer_replaces_call_id", rep);
 								switch_channel_event_set_data(channel, event);
 								switch_event_fire(&event);
 							}
@@ -9587,7 +9588,7 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Good Luck, you'll need it......\n");
 						nightmare_xfer_helper->profile = profile;
-						launch_nightmare_xfer(nightmare_xfer_helper);
+						// launch_nightmare_xfer(nightmare_xfer_helper);
 
 						switch_core_session_rwunlock(a_session);
 
@@ -9622,6 +9623,7 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 
 		switch_channel_set_variable_printf(channel, "transfer_to", "blind:%s", br ? br : exten);
 		switch_channel_set_variable_printf(channel, "transfer_destination", "blind:%s", exten);
+		switch_channel_set_variable_printf(channel, "transfer_destination_host", "blind:%s", refer_to->r_url->url_host);
 
 		if (!zstr(br) && (b_session = switch_core_session_locate(br))) {
 			const char *var;

@@ -2838,7 +2838,7 @@ SWITCH_DECLARE(void) switch_core_gen_encoded_silence(unsigned char *data, const 
 
 SWITCH_DECLARE(switch_cache_db_handle_type_t) switch_core_dbtype(void);
 SWITCH_DECLARE(void) switch_core_sql_exec(const char *sql);
-SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const char *profile_name);
+SWITCH_DECLARE(int) switch_core_recovery_recover(const char *technology, const char *profile_name, char *mode, char *value);
 SWITCH_DECLARE(void) switch_core_recovery_untrack(switch_core_session_t *session, switch_bool_t force);
 SWITCH_DECLARE(void) switch_core_recovery_track(switch_core_session_t *session);
 SWITCH_DECLARE(void) switch_core_recovery_flush(const char *technology, const char *profile_name);

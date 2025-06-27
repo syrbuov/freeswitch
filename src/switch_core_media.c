@@ -14031,13 +14031,15 @@ SWITCH_DECLARE (void) switch_core_media_recover_session(switch_core_session_t *s
 		return;
 	}
 
-	ip = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_IP_VARIABLE);
+	// ip = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_IP_VARIABLE);
+	ip = smh->mparams->extrtpip;
 	port = switch_channel_get_variable(session->channel, SWITCH_LOCAL_MEDIA_PORT_VARIABLE);
 
 	if (switch_channel_test_flag(session->channel, CF_PROXY_MODE)  || !(ip && port)) {
 		return;
 	} else {
-		a_ip = switch_channel_get_variable(session->channel, SWITCH_ADVERTISED_MEDIA_IP_VARIABLE);
+		// a_ip = switch_channel_get_variable(session->channel, SWITCH_ADVERTISED_MEDIA_IP_VARIABLE);
+		a_ip = smh->mparams->extrtpip;
 		r_ip = switch_channel_get_variable(session->channel, SWITCH_REMOTE_MEDIA_IP_VARIABLE);
 		r_port = switch_channel_get_variable(session->channel, SWITCH_REMOTE_MEDIA_PORT_VARIABLE);
 	}

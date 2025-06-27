@@ -2692,7 +2692,7 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 				switch_core_recovery_flush(tech, prof);
 				r = -1;
 			} else {
-				r = switch_core_recovery_recover(tech, prof);
+				r = switch_core_recovery_recover(tech, prof, NULL, NULL);
 			}
 
 			switch_safe_free(tech);

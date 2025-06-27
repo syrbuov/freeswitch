@@ -182,7 +182,9 @@ static void switch_core_standard_on_reset(switch_core_session_t *session)
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s Standard RESET\n", switch_channel_get_name(session->channel));
 
 	if (switch_channel_test_flag(session->channel, CF_RECOVERING_BRIDGE)) {
-		switch_core_session_t *other_session = NULL;
+		// Commented out code bellow is for disabling bridge recovering for originator legs, because it makes a delay while 
+		// resurrecting a bridge. It was observed while att transfer implementing in scenario on different fs nodes. 
+		/* switch_core_session_t *other_session = NULL;
 		const char *uuid = switch_core_session_get_uuid(session);
 
 		if (switch_channel_test_flag(session->channel, CF_BRIDGE_ORIGINATOR)) {
@@ -212,7 +214,7 @@ static void switch_core_standard_on_reset(switch_core_session_t *session)
 				}
 				switch_core_session_rwunlock(other_session);
 			}
-		}
+		} */
 
 		switch_channel_clear_flag(session->channel, CF_RECOVERING_BRIDGE);
 	}

@@ -1,0 +1,30 @@
+{
+    "files.associations": {
+        "switch.h": "c",
+        "libwebsockets.h": "c",
+        "bit": "c",
+        "bitset": "c",
+        "deque": "c",
+        "list": "c",
+        "map": "c",
+        "*.tcc": "c",
+        "set": "c",
+        "string": "c",
+        "unordered_map": "c",
+        "vector": "c",
+        "lws_config.h": "c",
+        "private-lib-core.h": "c",
+        "switch_json.h": "c",
+        "lws-logs.h": "c",
+        "ks.h": "c",
+        "tcp.h": "c",
+        "ks_platform.h": "c",
+        "random": "c",
+        "istream": "c",
+        "ostream": "c",
+        "streambuf": "c",
+        "regex": "c",
+        "mod_amqp.h": "c"
+    },
+    "cmake.sourceDirectory": "/usr/src/freeswitch/src"
+}

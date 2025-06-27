@@ -1085,7 +1085,7 @@ switch_status_t sofia_glue_do_invite(switch_core_session_t *session)
 
 	if (switch_channel_test_flag(tech_pvt->channel, CF_RECOVERING)) {
 		const char *recover_contact = switch_channel_get_variable(tech_pvt->channel, "sip_recover_contact");
-		recover_via = switch_channel_get_variable(tech_pvt->channel, "sip_recover_via");
+		// recover_via = switch_channel_get_variable(tech_pvt->channel, "sip_recover_via");
 
 		if (!zstr(invite_record_route)) {
 			record_route = switch_core_session_sprintf(session, "Record-Route: %s", invite_record_route);
@@ -2394,7 +2394,7 @@ int sofia_recover_callback(switch_core_session_t *session)
 
 
 
-int sofia_glue_recover(switch_bool_t flush)
+int sofia_glue_recover(char *mode, char* value)
 {
 	sofia_profile_t *profile;
 	int r = 0;
@@ -2405,7 +2405,7 @@ int sofia_glue_recover(switch_bool_t flush)
 		switch_console_callback_match_node_t *m;
 		for (m = matches->head; m; m = m->next) {
 			if ((profile = sofia_glue_find_profile(m->val))) {
-				r += sofia_glue_profile_recover(profile, flush);
+				r += sofia_glue_profile_recover(profile, mode, value);
 				sofia_glue_release_profile(profile);
 			}
 		}
@@ -2414,17 +2414,21 @@ int sofia_glue_recover(switch_bool_t flush)
 	return r;
 }
 
-int sofia_glue_profile_recover(sofia_profile_t *profile, switch_bool_t flush)
+int sofia_glue_profile_recover(sofia_profile_t *profile, char* mode, char* value)
 {
 	int r = 0;
 
 	if (profile) {
 		sofia_clear_pflag_locked(profile, PFLAG_STANDBY);
 
-		if (flush) {
-			switch_core_recovery_flush(SOFIA_RECOVER, profile->name);
+		if (mode) {
+			if (!strcmp(mode, "flush")) {
+				switch_core_recovery_flush(SOFIA_RECOVER, profile->name);
+			} else if ((!strcmp(mode, "uuid") || !strcmp(mode, "hostname")) && value) {
+				r = switch_core_recovery_recover(SOFIA_RECOVER, profile->name, mode, value);
+			}
 		} else {
-			r = switch_core_recovery_recover(SOFIA_RECOVER, profile->name);
+			r = switch_core_recovery_recover(SOFIA_RECOVER, profile->name, NULL, NULL);
 		}
 	}
 

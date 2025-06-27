@@ -4415,6 +4415,21 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_kill_uuid(const char *uuid, switch_ca
 	}
 }
 
+SWITCH_DECLARE(switch_status_t) switch_ivr_clear_uuid(const char *uuid, switch_call_cause_t cause)
+{
+	switch_core_session_t *session;
+
+	if (zstr(uuid) || !(session = switch_core_session_locate(uuid))) {
+		return SWITCH_STATUS_FALSE;
+	} else {
+		switch_channel_t *channel = switch_core_session_get_channel(session);
+		switch_channel_add_variable_var_check(channel, "clear_channel", "true", SWITCH_FALSE, SWITCH_STACK_BOTTOM);
+		switch_channel_hangup(channel, cause);
+		switch_core_session_rwunlock(session);
+		return SWITCH_STATUS_SUCCESS;
+	}
+}
+
 SWITCH_DECLARE(switch_status_t) switch_ivr_blind_transfer_ack(switch_core_session_t *session, switch_bool_t success)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
