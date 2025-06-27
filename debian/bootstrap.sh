@@ -36,7 +36,6 @@ avoid_mods=(
   applications/mod_limit
   applications/mod_mongo
   applications/mod_osp
-  applications/mod_rad_auth
   applications/mod_skel
   applications/mod_cluechoo
   codecs/mod_com_g729
@@ -44,15 +43,12 @@ avoid_mods=(
   codecs/mod_siren
   codecs/mod_skel_codec
   endpoints/mod_h323
-  endpoints/mod_khomp
   endpoints/mod_opal
   endpoints/mod_reference
   event_handlers/mod_smpp
-  event_handlers/mod_event_zmq
   formats/mod_webm
   sdk/autotools
   xml_int/mod_xml_ldap
-  xml_int/mod_xml_radius
 )
 avoid_mods_armhf=(
   languages/mod_v8
@@ -77,22 +73,18 @@ avoid_mods_wheezy=(
   applications/mod_cv
   applications/mod_hiredis
   formats/mod_shout
-  applications/mod_sonar
   formats/mod_vlc
 )
 avoid_mods_trusty=(
   event_handlers/mod_amqp
-  loggers/mod_raven
 )
 avoid_mods_utopic=(
   directories/mod_ldap
-  loggers/mod_raven
 )
 avoid_mods_xenial=(
   event_handlers/mod_ldap
   event_handlers/mod_amqp
   asr_tts/mod_flite
-  loggers/mod_raven
 )
 manual_pkgs=(
 freeswitch-all
@@ -485,7 +477,6 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-g723-1 (= \${binary:Version}),
  freeswitch-mod-g729 (= \${binary:Version}),
  freeswitch-mod-amr (= \${binary:Version}),
- freeswitch-mod-h26x (= \${binary:Version}),
  freeswitch-mod-sndfile (= \${binary:Version}),
  freeswitch-mod-native-file (= \${binary:Version}),
  freeswitch-mod-local-stream (= \${binary:Version}),
@@ -538,14 +529,10 @@ Recommends:
  freeswitch-mod-http-cache (= \${binary:Version}),
  freeswitch-mod-lcr (= \${binary:Version}),
  freeswitch-mod-nibblebill (= \${binary:Version}),
- freeswitch-mod-oreka (= \${binary:Version}),
  freeswitch-mod-pgsql (= \${binary:Version}),
  freeswitch-mod-redis (= \${binary:Version}),
- freeswitch-mod-rss (= \${binary:Version}),
  freeswitch-mod-sms (= \${binary:Version}),
  freeswitch-mod-snapshot (= \${binary:Version}),
- freeswitch-mod-snom (= \${binary:Version}),
- freeswitch-mod-sonar (= \${binary:Version}),
  freeswitch-mod-spandsp (= \${binary:Version}),
  freeswitch-mod-spy (= \${binary:Version}),
  freeswitch-mod-valet-parking (= \${binary:Version}),
@@ -622,18 +609,14 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-lcr (= \${binary:Version}),
  freeswitch-mod-memcache (= \${binary:Version}),
  freeswitch-mod-nibblebill (= \${binary:Version}),
- freeswitch-mod-oreka (= \${binary:Version}),
  freeswitch-mod-mariadb (= \${binary:Version}),
  freeswitch-mod-pgsql (= \${binary:Version}),
  freeswitch-mod-png (= \${binary:Version}),
  freeswitch-mod-redis (= \${binary:Version}),
- freeswitch-mod-rss (= \${binary:Version}),
  freeswitch-mod-signalwire (= \${binary:Version}),
  freeswitch-mod-shout (= \${binary:Version}),
  freeswitch-mod-sms (= \${binary:Version}),
  freeswitch-mod-snapshot (= \${binary:Version}),
- freeswitch-mod-snom (= \${binary:Version}),
- freeswitch-mod-sonar (= \${binary:Version}),
  freeswitch-mod-spandsp (= \${binary:Version}),
  freeswitch-mod-spy (= \${binary:Version}),
  freeswitch-mod-translate (= \${binary:Version}),
@@ -670,7 +653,6 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-lua (= \${binary:Version}),
  freeswitch-mod-perl (= \${binary:Version}),
  freeswitch-mod-python3 (= \${binary:Version}),
- freeswitch-mod-yaml (= \${binary:Version}),
  freeswitch-mod-console (= \${binary:Version}),
  freeswitch-mod-logfile (= \${binary:Version}),
  freeswitch-mod-syslog (= \${binary:Version}),
@@ -700,11 +682,9 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-codec2 (= \${binary:Version}),
  freeswitch-mod-g723-1 (= \${binary:Version}),
  freeswitch-mod-g729 (= \${binary:Version}),
- freeswitch-mod-h26x (= \${binary:Version}),
  freeswitch-mod-opus (= \${binary:Version}),
  freeswitch-mod-silk (= \${binary:Version}),
  freeswitch-mod-spandsp (= \${binary:Version}),
- freeswitch-mod-theora (= \${binary:Version}),
 Suggests:
  freeswitch-mod-ilbc (= \${binary:Version}),
  freeswitch-mod-siren (= \${binary:Version})
@@ -724,11 +704,9 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-codec2-dbg (= \${binary:Version}),
  freeswitch-mod-g723-1-dbg (= \${binary:Version}),
  freeswitch-mod-g729-dbg (= \${binary:Version}),
- freeswitch-mod-h26x-dbg (= \${binary:Version}),
  freeswitch-mod-opus-dbg (= \${binary:Version}),
  freeswitch-mod-silk-dbg (= \${binary:Version}),
  freeswitch-mod-spandsp-dbg (= \${binary:Version}),
- freeswitch-mod-theora-dbg (= \${binary:Version}),
 Suggests:
  freeswitch-mod-ilbc-dbg (= \${binary:Version}),
  freeswitch-mod-siren-dbg (= \${binary:Version})
@@ -849,16 +827,12 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-lcr-dbg (= \${binary:Version}),
  freeswitch-mod-memcache-dbg (= \${binary:Version}),
  freeswitch-mod-nibblebill-dbg (= \${binary:Version}),
- freeswitch-mod-oreka-dbg (= \${binary:Version}),
  freeswitch-mod-mariadb-dbg (= \${binary:Version}),
  freeswitch-mod-pgsql-dbg (= \${binary:Version}),
  freeswitch-mod-png-dbg (= \${binary:Version}),
  freeswitch-mod-redis-dbg (= \${binary:Version}),
- freeswitch-mod-rss-dbg (= \${binary:Version}),
  freeswitch-mod-sms-dbg (= \${binary:Version}),
  freeswitch-mod-snapshot-dbg (= \${binary:Version}),
- freeswitch-mod-snom-dbg (= \${binary:Version}),
- freeswitch-mod-sonar-dbg (= \${binary:Version}),
  freeswitch-mod-spandsp-dbg (= \${binary:Version}),
  freeswitch-mod-spy-dbg (= \${binary:Version}),
  freeswitch-mod-translate-dbg (= \${binary:Version}),
@@ -895,7 +869,6 @@ Depends: \${misc:Depends}, freeswitch (= \${binary:Version}),
  freeswitch-mod-lua-dbg (= \${binary:Version}),
  freeswitch-mod-perl-dbg (= \${binary:Version}),
  freeswitch-mod-python3-dbg (= \${binary:Version}),
- freeswitch-mod-yaml-dbg (= \${binary:Version}),
  freeswitch-mod-console-dbg (= \${binary:Version}),
  freeswitch-mod-logfile-dbg (= \${binary:Version}),
  freeswitch-mod-syslog-dbg (= \${binary:Version}),

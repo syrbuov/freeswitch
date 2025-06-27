@@ -110,10 +110,9 @@ Vendor:       	http://www.freeswitch.org/
 #
 ######################################################################################################################
 Source0:        http://files.freeswitch.org/%{name}-%{nonparsedversion}.tar.bz2
-Source1:	http://files.freeswitch.org/downloads/libs/freeradius-client-1.1.7.tar.gz
-Source2:	http://files.freeswitch.org/downloads/libs/communicator_semi_6000_20080321.tar.gz
-Source3:	http://files.freeswitch.org/downloads/libs/pocketsphinx-0.8.tar.gz
-Source4:	http://files.freeswitch.org/downloads/libs/sphinxbase-0.8.tar.gz
+Source1:	http://files.freeswitch.org/downloads/libs/communicator_semi_6000_20080321.tar.gz
+Source2:	http://files.freeswitch.org/downloads/libs/pocketsphinx-0.8.tar.gz
+Source3:	http://files.freeswitch.org/downloads/libs/sphinxbase-0.8.tar.gz
 Prefix:        	%{prefix}
 
 
@@ -451,14 +450,6 @@ Provides FreeSWITCH mod_nibblebill, provides a credit/debit module for
 FreeSWITCH to allow real-time debiting of credit or cash from a database 
 while calls are in progress.
 
-%package application-rad_auth
-Summary:	FreeSWITCH mod_rad_auth
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-
-%description application-rad_auth
-Provides FreeSWITCH mod_rad_auth, authentication via RADIUS protocol from FreeSWITCH dialplan
-
 %package application-redis
 Summary:	FreeSWITCH mod_redis
 Group:          System/Libraries
@@ -467,15 +458,6 @@ Requires:       %{name} = %{version}-%{release}
 %description application-redis
 Provides FreeSWITCH mod_redis, access to the redis key value pair db system from
 FreeSWITCH
-
-%package application-rss
-Summary:	FreeSWITCH mod_rss
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-
-%description application-rss
-Provides FreeSWITCH mod_rss, edisrse and read an XML based RSS feed, then read
-the entries aloud via a TTS engine
 
 %package application-signalwire
 Summary:	FreeSWITCH mod_signalwire
@@ -504,15 +486,6 @@ Requires:       %{name} = %{version}-%{release}
 %description application-snapshot
 Provides FreeSWITCH mod_snapshot, allows recording a sliding window of audio 
 and taking snapshots to disk. 
-
-%package application-snom
-Summary:	FreeSWITCH mod_snom
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-
-%description application-snom
-Provides FreeSWITCH mod_snom, an application for controlling the functionality 
-and appearance of the programmable softkeys on Snom phones
 
 %package application-spy
 Summary:	FreeSWITCH mod_spy
@@ -658,14 +631,6 @@ Conflicts:	codec-com-g729
 %description codec-passthru-g729
 Pass-through g729 Codec support for FreeSWITCH open source telephony platform
 
-%package codec-h26x
-Summary:        H.263/H.264 Video Codec support for FreeSWITCH open source telephony platform
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-
-%description codec-h26x
-H.263/H.264 Video Codec support for FreeSWITCH open source telephony platform
-
 %package codec-ilbc
 Summary:        iLCB Codec support for FreeSWITCH open source telephony platform
 Group:          System/Libraries
@@ -718,14 +683,6 @@ see http://www.polycom.com/usa/en/company/about_us/technology/siren_g7221/siren_
 and http://www.polycom.com/usa/en/company/about_us/technology/siren14_g7221c/siren14_g7221c.html 
 At the time of this packaging, Polycom does not charge for licensing.
 
-%package codec-theora
-Summary:        Theora Video Codec support for FreeSWITCH open source telephony platform
-Group:          System/Libraries
-Requires:       %{name} = %{version}-%{release}
-
-%description codec-theora
-Theora Video Codec support for FreeSWITCH open source telephony platform.
-
 ######################################################################################################################
 #				FreeSWITCH Database Modules
 ######################################################################################################################
@@ -773,14 +730,6 @@ PostgreSQL native support for FreeSWITCH.
 #
 #%description endpoint-h323
 #H.323 endpoint support for FreeSWITCH open source telephony platform
-
-#%package endpoint-khomp
-#Summary:        khomp endpoint support for FreeSWITCH open source telephony platform
-#Group:          System/Libraries
-#Requires:       %{name} = %{version}-%{release}
-#
-#%description endpoint-khomp
-#Khomp hardware endpoint support for FreeSWITCH open source telephony platform.
 
 %package endpoint-rtmp
 Summary:        RTPM Endpoint support for FreeSWITCH open source telephony platform
@@ -873,14 +822,6 @@ Requires:	%{name} = %{version}-%{release}
 %description event-multicast
 Multicast Event System for FreeSWITCH.
 
-#%package event-zmq
-#Summary:	ZeroMQ Event System for the FreeSWITCH open source telephony platform
-#Group:		System/Libraries
-#Requires:	 %{name} = %{version}-%{release}
-#
-#%description event-zmq
-#ZeroMQ Event System for FreeSWITCH.
-
 %package event-json-cdr
 Summary:	JSON CDR Logger for the FreeSWITCH open source telephony platform
 Group:		System/Libraries
@@ -888,14 +829,6 @@ Requires:	%{name} = %{version}-%{release}
 
 %description event-json-cdr
 JSON CDR Logger for FreeSWITCH.
-
-%package event-radius-cdr
-Summary:        RADIUS Logger for the FreeSWITCH open source telephony platform
-Group:          System/Libraries
-Requires:        %{name} = %{version}-%{release}
-
-%description event-radius-cdr
-RADIUS Logger for the FreeSWITCH open source telephony platform
 
 %package event-snmp
 Summary:	SNMP stats reporter for the FreeSWITCH open source telephony platform
@@ -1200,11 +1133,9 @@ Requires:	freeswitch-application-limit
 Requires:	freeswitch-application-memcache
 Requires:	freeswitch-application-nibblebill
 Requires:	freeswitch-application-redis
-Requires:	freeswitch-application-rss
 Requires:	freeswitch-application-signalwire
 Requires:	freeswitch-application-sms
 Requires:	freeswitch-application-snapshot
-Requires:	freeswitch-application-snom
 Requires:	freeswitch-application-spy
 Requires:	freeswitch-application-valet_parking
 Requires:	freeswitch-application-video_filter
@@ -1214,7 +1145,6 @@ Requires:	freeswitch-codec-passthru-amr
 Requires:	freeswitch-codec-bv
 Requires:	freeswitch-codec-passthru-g723_1
 Requires:	freeswitch-codec-passthru-g729
-Requires:	freeswitch-codec-h26x
 Requires:	freeswitch-codec-ilbc
 Requires:	freeswitch-codec-siren
 Requires:	freeswitch-database-pgsql
@@ -1280,10 +1210,10 @@ APPLICATION_MODULES_DE+="applications/mod_esl"
 
 APPLICATION_MODULES_FR="applications/mod_fifo applications/mod_fsk applications/mod_fsv applications/mod_hash \
 			applications/mod_httapi applications/mod_http_cache applications/mod_lcr applications/mod_limit \
-			applications/mod_memcache applications/mod_mongo applications/mod_nibblebill applications/mod_rad_auth \
-			applications/mod_redis applications/mod_rss "
+			applications/mod_memcache applications/mod_mongo applications/mod_nibblebill \
+			applications/mod_redis "
 
-APPLICATION_MODULES_SZ="applications/mod_signalwire applications/mod_sms applications/mod_snapshot applications/mod_snom \
+APPLICATION_MODULES_SZ="applications/mod_signalwire applications/mod_sms applications/mod_snapshot \
 			applications/mod_spandsp applications/mod_spy \
 			applications/mod_valet_parking applications/mod_translate applications/mod_voicemail \
 			applications/mod_voicemail_ivr applications/mod_video_filter"
@@ -1303,8 +1233,8 @@ ASR_TTS_MODULES="asr_tts/mod_flite asr_tts/mod_pocketsphinx asr_tts/mod_tts_comm
 #
 ######################################################################################################################
 CODECS_MODULES="codecs/mod_amr codecs/mod_amrwb codecs/mod_bv codecs/mod_codec2 codecs/mod_g723_1 \
-		codecs/mod_g729 codecs/mod_h26x codecs/mod_ilbc codecs/mod_opus codecs/mod_silk \
-		codecs/mod_siren codecs/mod_theora"
+		codecs/mod_g729 codecs/mod_ilbc codecs/mod_opus codecs/mod_silk \
+		codecs/mod_siren"
 #
 
 ######################################################################################################################
@@ -1337,7 +1267,7 @@ ENDPOINTS_MODULES=" \
 			endpoints/mod_loopback endpoints/mod_rtmp \
 			endpoints/mod_skinny endpoints/mod_verto endpoints/mod_rtc endpoints/mod_sofia"
 
-## DISABLED MODULES DUE TO BUILD ISSUES endpoints/mod_h323 endpoints/mod_khomp 
+## DISABLED MODULES DUE TO BUILD ISSUES endpoints/mod_h323
  
 ######################################################################################################################
 #
@@ -1346,10 +1276,9 @@ ENDPOINTS_MODULES=" \
 ######################################################################################################################
 EVENT_HANDLERS_MODULES="event_handlers/mod_cdr_csv event_handlers/mod_cdr_pg_csv event_handlers/mod_cdr_sqlite \
 			event_handlers/mod_cdr_mongodb event_handlers/mod_format_cdr event_handlers/mod_erlang_event event_handlers/mod_event_multicast \
-			event_handlers/mod_event_socket event_handlers/mod_json_cdr event_handlers/mod_radius_cdr \
+			event_handlers/mod_event_socket event_handlers/mod_json_cdr \
 			event_handlers/mod_snmp"
 
-#### BUILD ISSUES NET RESOLVED FOR RELEASE event_handlers/mod_event_zmq 
 ######################################################################################################################
 #
 #					File and Audio Format Handlers
@@ -1772,14 +1701,12 @@ fi
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/msrp.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/nibblebill.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/opal.conf.xml
-%config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/oreka.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/osp.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/pocketsphinx.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/post_load_modules.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/pre_load_modules.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/presence_map.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/redis.conf.xml
-%config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/rss.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/rtmp.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/shout.conf.xml
 %config(noreplace) %attr(0640, freeswitch, daemon) %{sysconfdir}/autoload_configs/signalwire.conf.xml
@@ -1929,14 +1856,8 @@ fi
 %files application-nibblebill
 %{MODINSTDIR}/mod_nibblebill.so*
 
-%files application-rad_auth
-%{MODINSTDIR}/mod_rad_auth.so*
-
 %files application-redis
 %{MODINSTDIR}/mod_redis.so*
-
-%files application-rss
-%{MODINSTDIR}/mod_rss.so*
 
 %files application-signalwire
 %{MODINSTDIR}/mod_signalwire.so*
@@ -1946,9 +1867,6 @@ fi
 
 %files application-snapshot
 %{MODINSTDIR}/mod_snapshot.so*
-
-%files application-snom
-%{MODINSTDIR}/mod_snom.so*
 
 %files application-spy
 %{MODINSTDIR}/mod_spy.so*
@@ -2007,9 +1925,6 @@ fi
 %files codec-passthru-g729
 %{MODINSTDIR}/mod_g729.so*
 
-%files codec-h26x
-%{MODINSTDIR}/mod_h26x.so*
-
 %files codec-ilbc
 %{MODINSTDIR}/mod_ilbc.so*
 
@@ -2022,9 +1937,6 @@ fi
 
 %files codec-siren
 %{MODINSTDIR}/mod_siren.so*
-
-%files codec-theora
-%{MODINSTDIR}/mod_theora.so*
 
 ######################################################################################################################
 #
@@ -2055,9 +1967,6 @@ fi
 
 #%files endpoint-h323
 #%{MODINSTDIR}/mod_h323.so*
-
-#%files endpoint-khomp
-#%{MODINSTDIR}/mod_khomp.so*
 
 %files endpoint-rtmp
 %{MODINSTDIR}/mod_rtmp.so*
@@ -2096,14 +2005,8 @@ fi
 %files event-multicast
 %{MODINSTDIR}/mod_event_multicast.so*
 
-#%files event-zmq
-#%{MODINSTDIR}/mod_xmq.so*
-
 %files event-json-cdr
 %{MODINSTDIR}/mod_json_cdr.so*
-
-%files event-radius-cdr
-%{MODINSTDIR}/mod_radius_cdr.so*
 
 %files event-snmp
 %{MODINSTDIR}/mod_snmp.so*
