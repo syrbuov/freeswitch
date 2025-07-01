@@ -3259,6 +3259,7 @@ static int recover_callback(void *pArg, int argc, char **argv, char **columnName
 			}
 
 			switch_channel_set_state(channel, CS_INIT);
+			switch_channel_set_variable(channel, "sip_h_X-Recovered", "true");
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
 							  "Resurrecting fallen channel %s\n", switch_channel_get_name(channel));
 			switch_core_session_thread_launch(session);
