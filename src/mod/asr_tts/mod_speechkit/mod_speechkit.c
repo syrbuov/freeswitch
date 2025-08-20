@@ -349,7 +349,8 @@ static switch_status_t speechkit_asr_unload_grammar(switch_asr_handle_t *ah, con
 static switch_status_t speechkit_asr_check_results(switch_asr_handle_t *ah, switch_asr_flag_t *flags)
 {
 	speechkit_asr_t *speechkit = (speechkit_asr_t *) ah->private_info;
-	return (speechkit->result && (strstr(speechkit->result, "\"\"") == NULL)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+	// return (speechkit->result && (strstr(speechkit->result, "\"\"") == NULL)) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
+	return (speechkit->result) ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_FALSE;
 }
 
 /*! function to read results from the ASR */
