@@ -161,10 +161,10 @@ static switch_status_t speechkit_speech_read_tts(switch_speech_handle_t *sh, voi
 	}
 	rlen = kws_read_frame(speechkit->ws, &oc, &rdata);
 	if (rlen < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "kws_read_frame rlen %d < 0  and oc = %d\n", rlen, oc);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "kws_read_frame rlen %d < 0  and oc = %d\n", rlen, oc);
 		return SWITCH_STATUS_BREAK;
 	} else if (rlen == 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "kws_read_frame rlen == 0 and oc = %d\n", oc);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "kws_read_frame rlen == 0 and oc = %d\n", oc);
 	}
 	if (oc == WSOC_PING) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received ping\n");
