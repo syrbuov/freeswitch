@@ -48,14 +48,15 @@ applications/mod_sms
 #applications/mod_soundtouch
 applications/mod_spandsp
 #applications/mod_spy
-applications/mod_test
+#applications/mod_stress
 #applications/mod_translate
 applications/mod_valet_parking
 #applications/mod_video_filter
 #applications/mod_vmd
 applications/mod_voicemail
 #applications/mod_voicemail_ivr
-#asr_tts/mod_flite
+#asr_tts/mod_cepstral
+asr_tts/mod_flite
 #asr_tts/mod_pocketsphinx
 #asr_tts/mod_tts_commandline
 #asr_tts/mod_unimrcp
@@ -86,6 +87,8 @@ dialplans/mod_dialplan_asterisk
 dialplans/mod_dialplan_xml
 #directories/mod_ldap
 #endpoints/mod_alsa
+#endpoints/mod_dingaling
+#endpoints/mod_gsmopen
 #endpoints/mod_h323
 #endpoints/mod_khomp
 endpoints/mod_loopback
@@ -96,7 +99,7 @@ endpoints/mod_rtc
 endpoints/mod_skinny
 endpoints/mod_sofia
 endpoints/mod_verto
-#event_handlers/mod_amqp
+event_handlers/mod_amqp
 event_handlers/mod_cdr_csv
 #event_handlers/mod_cdr_mongodb
 event_handlers/mod_cdr_pg_csv
@@ -109,6 +112,8 @@ event_handlers/mod_event_socket
 #event_handlers/mod_json_cdr
 #event_handlers/mod_radius_cdr
 #event_handlers/mod_odbc_cdr
+#event_handlers/mod_kazoo
+#event_handlers/mod_rayo
 #event_handlers/mod_smpp
 #event_handlers/mod_snmp
 #event_handlers/mod_event_zmq
