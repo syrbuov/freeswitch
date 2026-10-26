@@ -1,4 +1,6 @@
-# Producer lifecycle tests
+# mod_amqp tests
+
+## Producer lifecycle
 
 These tests use `switch_test.h` and the real FreeSWITCH event engine, bindings,
 queues, memory pools and thread joins. A joinable test worker replaces the
@@ -33,3 +35,48 @@ for commands and the cached-Core mismatch. ASan/UBSan and TSan with an
 instrumented libfreeswitch have not been run. The suite
 does not validate RabbitMQ I/O, real sender reconnect/timeout behavior, arbitrary
 third-party event callbacks invoking reload, or full command/logging teardown.
+
+## Standalone Filter Engine
+
+`test/test_filter_engine.c` includes the three production engine sources with
+test-local malloc/calloc accounting, allocation failure injection and guards
+against binding, thread, queue, serialization and hash management calls.
+Production code contains no test hooks. XML, event creation and headers use
+real FreeSWITCH APIs. The engine has no dependency on producer globals or AMQP.
+
+There are 19 test cases, including exact event spellings (`CUSTOM` and
+`SWITCH_EVENT_CUSTOM`), strict XML, OR/AND, normalization and subscriptions,
+canonical event fields, repeated headers and arrays, empty/missing values,
+XML/DTO lifetime, limits, allocation failures, event immutability, allocation-free
+matching, and eight concurrent readers (20,000 matches each).
+
+The regular run initializes full Core. The test-only environment variable
+`MOD_AMQP_FILTER_TEST_MINIMAL=1` selects minimal Core: all 19 tests and real
+reader threads still run, but event delivery and unrelated Core subsystems are
+not needed. This isolates the sanitizer checks; producer lifecycle tests still
+require full Core.
+
+In a configured build whose cached Core differs from the installed Core, use
+explicit linkage rather than relying on the build-tree `.la`:
+
+```sh
+cd /usr/src/freeswitch/src/mod/event_handlers/mod_amqp
+make -j2 mod_amqp.la check \
+  test_test_filter_engine_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so" \
+  test_test_filter_engine_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib" \
+  test_test_producer_lifecycle_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq" \
+  test_test_producer_lifecycle_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib"
+```
+
+The sanitizer helper compiles isolated binaries under `/tmp`, links the
+explicitly selected installed Core, and runs both ASan/UBSan (with leak
+detection) and TSan. It requires a configured source tree, a compatible Core,
+GCC-compatible sanitizer flags, and `timeout`:
+
+```sh
+sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-stage2-sanitizers /usr/local/freeswitch/lib
+```
+
+Neither command installs anything or reloads the running module. Core itself
+is not instrumented by the helper. See the [stage 2 report](../../../../../docs/mod_amqp/filter-engine-stage2.md)
+for successful runs and the separate sanitizer failures with full Core.

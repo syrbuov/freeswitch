@@ -1,0 +1,41 @@
+#!/bin/sh
+# Standalone test binaries only. Does not install modules or build Core.
+set -eu
+
+amqp_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+amqp_source_root=$(CDPATH= cd -- "$amqp_dir/../../../.." && pwd)
+amqp_output_dir=${1:-$(mktemp -d /tmp/mod-amqp-filter-sanitizers.XXXXXX)}
+amqp_core_libdir=${2:-/usr/local/freeswitch/lib}
+mkdir -p "$amqp_output_dir"
+amqp_output_dir=$(CDPATH= cd -- "$amqp_output_dir" && pwd)
+amqp_core_libdir=$(CDPATH= cd -- "$amqp_core_libdir" && pwd)
+amqp_failed=0
+
+for amqp_sanitizer in address,undefined thread; do
+	amqp_binary="$amqp_output_dir/test_filter_engine_$amqp_sanitizer"
+	if "${CC:-cc}" -DHAVE_CONFIG_H -I"$amqp_dir" -I"$amqp_source_root/src/include" \
+		-I"$amqp_source_root/libs/esl/src/include" -I"$amqp_source_root/libs/xmlrpc-c" \
+		-I"$amqp_source_root/libs/libteletone/src" \
+		-DSWITCH_API_VISIBILITY=1 -DCJSON_API_VISIBILITY=1 -DHAVE_VISIBILITY=1 -DHAVE_OPENSSL \
+		-Wall -Werror -Wno-unused-result -Wno-misleading-indentation -std=c99 -pedantic \
+		-Wdeclaration-after-statement -g -O1 -fno-omit-frame-pointer "-fsanitize=$amqp_sanitizer" \
+		"-DSWITCH_TEST_BASE_DIR_FOR_CONF=\"$amqp_dir/test\"" \
+		"-DSWITCH_TEST_BASE_DIR_OVERRIDE=\"$amqp_dir/test\"" \
+		"$amqp_dir/test/test_filter_engine.c" "$amqp_core_libdir/libfreeswitch.so" \
+		"-Wl,-rpath,$amqp_core_libdir" -lssl -lcrypto -lpthread -o "$amqp_binary" \
+		> "$amqp_binary.build.log" 2>&1; then
+		if MOD_AMQP_FILTER_TEST_MINIMAL=1 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+			UBSAN_OPTIONS=halt_on_error=1 TSAN_OPTIONS=halt_on_error=1 \
+			timeout 90s "$amqp_binary" > "$amqp_binary.log" 2>&1; then
+			printf '%s: PASS (%s.log)\n' "$amqp_sanitizer" "$amqp_binary"
+		else
+			amqp_status=$?
+			printf '%s: FAIL, exit %s (%s.log)\n' "$amqp_sanitizer" "$amqp_status" "$amqp_binary"
+			amqp_failed=1
+		fi
+	else
+		printf '%s: BUILD FAILED (%s.build.log)\n' "$amqp_sanitizer" "$amqp_binary"
+		amqp_failed=1
+	fi
+done
+exit "$amqp_failed"
