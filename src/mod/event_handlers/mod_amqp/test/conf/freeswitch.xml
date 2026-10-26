@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<document type="freeswitch/xml">
+  <section name="configuration">
+    <configuration name="modules.conf"><modules/></configuration>
+    <configuration name="timezones.conf">
+      <timezones><zone name="GMT" value="GMT0"/></timezones>
+    </configuration>
+    <configuration name="amqp.conf">
+      <producers/>
+      <commands/>
+      <logging/>
+    </configuration>
+  </section>
+</document>

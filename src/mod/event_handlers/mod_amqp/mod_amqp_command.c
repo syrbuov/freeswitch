@@ -114,6 +114,9 @@ switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg)
 
 	profile->pool = pool;
 	profile->name = switch_core_strdup(profile->pool, name);
+	if (switch_mutex_init(&profile->mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		goto err;
+	}
 	profile->running = 1;
 	profile->reconnect_interval_ms = 1000;
 
@@ -276,6 +279,11 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 {
 	amqp_bytes_t queueName = { 0, NULL };
 	mod_amqp_command_profile_t *profile = (mod_amqp_command_profile_t *) data;
+
+	switch_mutex_lock(profile->mutex);
+	profile->command_thread_id = switch_thread_self();
+	profile->command_thread_started = SWITCH_TRUE;
+	switch_mutex_unlock(profile->mutex);
 
 	while (profile->running) {
 		amqp_queue_declare_ok_t *recv_queue;

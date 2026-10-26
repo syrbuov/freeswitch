@@ -38,6 +38,16 @@
 
 #include "mod_amqp.h"
 
+static switch_bool_t mod_amqp_producer_is_running(mod_amqp_producer_profile_t *profile)
+{
+	switch_bool_t running;
+
+	switch_mutex_lock(profile->state_mutex);
+	running = profile->running;
+	switch_mutex_unlock(profile->state_mutex);
+	return running;
+}
+
 switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
 											  switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[])
 {
@@ -81,7 +91,7 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 	}
 
 	/* If the mod is disabled ignore the event */
-	if (!profile->running) {
+	if (!mod_amqp_producer_is_running(profile)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] not running\n", profile->name);
 		return;
 	}
@@ -115,6 +125,8 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **prof) {
 	mod_amqp_message_t *msg = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	switch_status_t cleanup_status = SWITCH_STATUS_SUCCESS;
+	unsigned int i;
 	mod_amqp_connection_t *conn = NULL, *conn_next = NULL;
 	switch_memory_pool_t *pool;
 	mod_amqp_producer_profile_t *profile;
@@ -126,15 +138,41 @@ switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **prof) {
 	profile = *prof;
 	pool = profile->pool;
 
-	if (profile->name) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
-		switch_core_hash_delete(mod_amqp_globals.producer_hash, profile->name);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
+
+	/* Unbind waits for event delivery, including callbacks already in progress.
+	 * Keep the profile and queue alive until every owned binding is gone.
+	 * Management callers serialize access with lifecycle_mutex; callbacks must
+	 * never take that mutex or call this function themselves.
+	 */
+	for (i = 0; i < sizeof(profile->event_nodes) / sizeof(profile->event_nodes[0]); i++) {
+		if (profile->event_nodes[i] && switch_event_unbind(&profile->event_nodes[i]) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] cannot remove event binding %u; retaining profile\n", profile->name, i);
+			cleanup_status = SWITCH_STATUS_GENERR;
+		}
 	}
 
-	profile->running = 0;
+	if (profile->state_mutex) {
+		switch_mutex_lock(profile->state_mutex);
+		profile->running = SWITCH_FALSE;
+		switch_mutex_unlock(profile->state_mutex);
+	}
 
 	if (profile->producer_thread) {
-		switch_thread_join(&status, profile->producer_thread);
+		if (switch_thread_join(&status, profile->producer_thread) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] cannot join sender; retaining profile\n", profile->name);
+			return SWITCH_STATUS_GENERR;
+		}
+		profile->producer_thread = NULL;
+	}
+
+	if (cleanup_status != SWITCH_STATUS_SUCCESS) {
+		return cleanup_status;
+	}
+
+	/* A failed/unregistered instance must not delete another profile's entry. */
+	if (profile->name && switch_core_hash_find(mod_amqp_globals.producer_hash, profile->name) == profile) {
+		switch_core_hash_delete(mod_amqp_globals.producer_hash, profile->name);
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] closing AMQP socket...\n", profile->name);
@@ -167,6 +205,9 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	char  *argv[SWITCH_EVENT_ALL];
 	switch_xml_t params, param, connections, connection;
 	switch_threadattr_t *thd_attr = NULL;
+	switch_thread_t *producer_thread = NULL;
+	switch_mutex_t *state_mutex = NULL;
+	switch_queue_t *send_queue = NULL;
 	char *exchange = NULL, *exchange_type = NULL, *content_type = NULL;
 	int exchange_durable = 1; /* durable */
 	int delivery_mode = -1;
@@ -177,6 +218,12 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 
 	memset(format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(char *));
 
+	/* Called only by the serialized management path. Never replace a live owner. */
+	if (switch_core_hash_find(mod_amqp_globals.producer_hash, name)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Producer profile[%s] already exists\n", name);
+		return SWITCH_STATUS_GENERR;
+	}
+
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		goto err;
 	}
@@ -184,7 +231,11 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	profile = switch_core_alloc(pool, sizeof(mod_amqp_producer_profile_t));
 	profile->pool = pool;
 	profile->name = switch_core_strdup(profile->pool, name);
-	profile->running = 1;
+	if (switch_mutex_init(&state_mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		goto err;
+	}
+	profile->state_mutex = state_mutex;
+	profile->running = SWITCH_TRUE; /* Not published to any thread yet. */
 	memset(profile->format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(mod_amqp_keypart_t));
 	profile->events[0].id = SWITCH_EVENT_ALL;
 	profile->events[0].subclass = SWITCH_EVENT_SUBCLASS_ANY;
@@ -336,18 +387,31 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	/* We are not going to open the producer queue connection on create, but instead wait for the running thread to open it */
 
 	/* Create a bounded FIFO queue for sending messages */
-	if (switch_queue_create(&(profile->send_queue), profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_queue_create(&send_queue, profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create send queue of size %d!\n", profile->send_queue_size);
 		goto err;
 	}
+	profile->send_queue = send_queue;
 
-	/* Start the event send thread. This will set up the initial connection */
-	switch_threadattr_create(&thd_attr, profile->pool);
-	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	if (switch_thread_create(&profile->producer_thread, thd_attr, mod_amqp_producer_thread, profile, profile->pool)) {
+	/* Track the owner before publishing any callbacks or starting the sender.
+	 * If teardown unexpectedly fails, the retained profile remains reachable.
+	 */
+	if (switch_core_hash_insert(mod_amqp_globals.producer_hash, name, (void *) profile) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to insert new profile [%s] into mod_amqp profile hash\n", name);
+		goto err;
+	}
+
+	/* Start an explicitly joinable sender. Publish its handle only on success:
+	 * a failed thread_create may still write an unusable output handle.
+	 */
+	if (switch_threadattr_create(&thd_attr, profile->pool) != SWITCH_STATUS_SUCCESS ||
+		switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE) != SWITCH_STATUS_SUCCESS ||
+		switch_threadattr_detach_set(thd_attr, 0) != SWITCH_STATUS_SUCCESS ||
+		switch_thread_create(&producer_thread, thd_attr, mod_amqp_producer_thread, profile, profile->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create 'amqp event sender' thread!\n");
 		goto err;
 	}
+	profile->producer_thread = producer_thread;
 
 	/* Subscribe events */
 	for (i = 0; i < profile->event_subscriptions; i++) {
@@ -363,17 +427,14 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 		}
 	}
 
-	if ( switch_core_hash_insert(mod_amqp_globals.producer_hash, name, (void *) profile) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to insert new profile [%s] into mod_amqp profile hash\n", name);
-		goto err;
-	}
-
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Profile[%s] Successfully started\n", profile->name);
 	return SWITCH_STATUS_SUCCESS;
 
  err:
 	/* Cleanup */
-	mod_amqp_producer_destroy(&profile);
+	if (mod_amqp_producer_destroy(&profile) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Producer profile[%s] cleanup failed; retained for later teardown\n", name);
+	}
 	return SWITCH_STATUS_GENERR;
 
 }
@@ -447,7 +508,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 	amqp_boolean_t passive = 0;
 	amqp_boolean_t durable = 1;
 
-	while (profile->running) {
+	while (mod_amqp_producer_is_running(profile)) {
 
 		if (!profile->conn_active) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");

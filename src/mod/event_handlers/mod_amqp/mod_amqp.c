@@ -62,6 +62,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
 	mod_amqp_globals.pool = pool;
+	if (switch_mutex_init(&mod_amqp_globals.lifecycle_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_GENERR;
+	}
 	switch_core_hash_init(&(mod_amqp_globals.producer_hash));
 	switch_core_hash_init(&(mod_amqp_globals.command_hash));
 	switch_core_hash_init(&(mod_amqp_globals.logging_hash));
@@ -91,12 +94,25 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_amqp_shutdown)
 	mod_amqp_command_profile_t *command;
 	mod_amqp_logging_profile_t *logging;
 
+	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) {
+		return SWITCH_STATUS_NOUNLOAD;
+	}
+	if (mod_amqp_is_command_thread()) {
+		switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+		return SWITCH_STATUS_NOUNLOAD;
+	}
+	mod_amqp_globals.shutting_down = SWITCH_TRUE;
+
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mod starting shutting down\n");
-	switch_event_unbind_callback(mod_amqp_producer_event_handler);
 
 	while ((hi = switch_core_hash_first_iter(mod_amqp_globals.producer_hash, hi))) {
 		switch_core_hash_this(hi, NULL, NULL, (void **)&producer);
-		mod_amqp_producer_destroy(&producer);
+		if (mod_amqp_producer_destroy(&producer) != SWITCH_STATUS_SUCCESS) {
+			switch_safe_free(hi);
+			switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+			/* Core only preserves the DSO for NOUNLOAD, not for GENERR. */
+			return SWITCH_STATUS_NOUNLOAD;
+		}
 	}
 
 	while ((hi = switch_core_hash_first_iter(mod_amqp_globals.command_hash, hi))) {
@@ -115,6 +131,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_amqp_shutdown)
 	switch_core_hash_destroy(&(mod_amqp_globals.logging_hash));
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Mod finished shutting down\n");
+	switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
 	return SWITCH_STATUS_SUCCESS;
 }
 

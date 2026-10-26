@@ -130,6 +130,8 @@ typedef struct {
   switch_time_t circuit_breaker_reset_time;
   switch_bool_t enable_fallback_format_fields;
 
+  /* Protects running only; never held across unbind, join or AMQP I/O. */
+  switch_mutex_t *state_mutex;
   switch_bool_t running;
   switch_memory_pool_t *pool;
   char *custom_attr;
@@ -156,6 +158,8 @@ typedef struct {
 
   /* Listener thread */
   switch_thread_t *command_thread;
+  switch_thread_id_t command_thread_id;
+  switch_bool_t command_thread_started;
 
   switch_mutex_t *mutex;
   switch_bool_t running;
@@ -192,6 +196,9 @@ typedef struct {
 
 typedef struct mod_amqp_globals_s {
   switch_memory_pool_t *pool;
+  /* Management only: never acquired by producer callbacks or sender threads. */
+  switch_mutex_t *lifecycle_mutex;
+  switch_bool_t shutting_down;
 
   switch_hash_t *producer_hash;
   switch_hash_t *command_hash;
@@ -202,6 +209,7 @@ extern mod_amqp_globals_t mod_amqp_globals;
 
 /* utils */
 switch_status_t mod_amqp_do_config(switch_bool_t reload);
+switch_bool_t mod_amqp_is_command_thread(void);
 int mod_amqp_log_if_amqp_error(amqp_rpc_reply_t x, char const *context);
 int mod_amqp_count_chars(const char* string, char ch);
 void mod_amqp_util_msg_destroy(mod_amqp_message_t **msg);
@@ -218,6 +226,7 @@ switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg);
 void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void *data);
 
 /* producer */
+/* create/destroy require lifecycle_mutex in the management thread, never in an event callback. */
 void mod_amqp_producer_event_handler(switch_event_t* evt);
 switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
 					      switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[]);

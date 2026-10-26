@@ -87,14 +87,48 @@ int mod_amqp_count_chars(const char* string, char ch)
 	return c;
 }
 
+/* Called with lifecycle_mutex held. A command worker must not join itself. */
+switch_bool_t mod_amqp_is_command_thread(void)
+{
+	switch_hash_index_t *hi;
+	mod_amqp_command_profile_t *profile;
+	switch_bool_t current;
+
+	for (hi = switch_core_hash_first(mod_amqp_globals.command_hash); hi; hi = switch_core_hash_next(&hi)) {
+		switch_core_hash_this(hi, NULL, NULL, (void **)&profile);
+		switch_mutex_lock(profile->mutex);
+		current = profile->command_thread_started && switch_thread_equal(profile->command_thread_id, switch_thread_self());
+		switch_mutex_unlock(profile->mutex);
+		if (current) {
+			switch_safe_free(hi);
+			return SWITCH_TRUE;
+		}
+	}
+	return SWITCH_FALSE;
+}
+
 switch_status_t mod_amqp_do_config(switch_bool_t reload)
 {
 	switch_xml_t cfg = NULL, xml = NULL, profiles = NULL, profile = NULL;
+	switch_status_t status = SWITCH_STATUS_GENERR;
+
+	/* Do not wait here: a concurrent teardown may be joining this API's caller
+	 * when the request came from an AMQP command worker.
+	 */
+	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP lifecycle operation already in progress\n");
+		return SWITCH_STATUS_GENERR;
+	}
+	if (mod_amqp_globals.shutting_down || (reload && mod_amqp_is_command_thread())) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot reload AMQP during shutdown or from an AMQP command worker\n");
+		goto done;
+	}
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, reload ? "Reloading Config\n" : "Loading Config\n");
 
 	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "open of amqp.conf.xml failed\n");
-		return SWITCH_STATUS_FALSE;
+		status = SWITCH_STATUS_FALSE;
+		goto done;
 	}
 
 	if (reload) {
@@ -103,11 +137,12 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 		mod_amqp_command_profile_t *command;
 		mod_amqp_logging_profile_t *logging;
 
-		switch_event_unbind_callback(mod_amqp_producer_event_handler);
-
 		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.producer_hash, hi))) {
 			switch_core_hash_this(hi, NULL, NULL, (void **)&producer);
-			mod_amqp_producer_destroy(&producer);
+			if (mod_amqp_producer_destroy(&producer) != SWITCH_STATUS_SUCCESS) {
+				switch_safe_free(hi);
+				goto done;
+			}
 		}
 		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.command_hash, hi))) {
 			switch_core_hash_this(hi, NULL, NULL, (void **)&command);
@@ -193,8 +228,11 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate logging section for mod_amqp\n" );
 	}
 
-	switch_xml_free(xml);
-	return SWITCH_STATUS_SUCCESS;
+	status = SWITCH_STATUS_SUCCESS;
+done:
+	if (xml) switch_xml_free(xml);
+	switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+	return status;
 }
 
 
