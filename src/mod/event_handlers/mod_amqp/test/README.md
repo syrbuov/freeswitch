@@ -17,7 +17,9 @@ make -C src/mod/event_handlers/mod_amqp check
 Automake registers the executable as `test/test_producer_lifecycle`. The fixture
 loads no dynamic modules and supplies an empty `amqp.conf` for reload checks.
 The full event engine is required: `SCF_MINIMAL` would skip event delivery.
-The FST driver initializes core explicitly to avoid requiring a soft timer.
+The drivers point `mod_dir` at `test/conf`: an empty modules list alone would
+make Core scan the installed module directory. Full initialization still uses
+built-in Core modules, including its soft timer.
 
 The suite covers independent bindings, legacy overlap/default/empty/subclass
 behavior, duplicate names, ownership of hash entries, partial bind failures,
@@ -62,6 +64,8 @@ explicit linkage rather than relying on the build-tree `.la`:
 ```sh
 cd /usr/src/freeswitch/src/mod/event_handlers/mod_amqp
 make -j2 mod_amqp.la check \
+  mod_amqp_la_LIBADD="-L/usr/local/freeswitch/lib -lfreeswitch" \
+  mod_amqp_la_LDFLAGS="-avoid-version -module -no-undefined -shared -lrabbitmq -Wl,-z,defs -Wl,-rpath,/usr/local/freeswitch/lib" \
   test_test_filter_engine_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so" \
   test_test_filter_engine_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib" \
   test_test_producer_lifecycle_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq" \
@@ -80,3 +84,31 @@ sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-stage2-sanitizers /usr/loc
 Neither command installs anything or reloads the running module. Core itself
 is not instrumented by the helper. See the [stage 2 report](../../../../../docs/mod_amqp/filter-engine-stage2.md)
 for successful runs and the separate sanitizer failures with full Core.
+
+## Producer integration (stage 3)
+
+`test/test_producer_integration.c` selects 24 integration cases using the shared
+lifecycle fixture. It includes the production producer, configuration, module,
+command and logging code with test-local wrappers; connection settings and
+engine sources are compiled separately. It exercises real Core bindings/unbind,
+JSON, queues and logger delivery, including callback/JSON/enqueue counters.
+Producer workers use the synchronized stop accessor. Adjacent workers exit
+without network I/O; no RabbitMQ server is contacted by these workers.
+
+Coverage includes mode selection and legacy overlaps, unique rules subscriptions,
+rejection before allocation/JSON, whole-set preparation and activation failure
+cleanup, retained engines and reader/sender barriers, API error propagation,
+logger rebinding, all concrete subscriptions, 1024 rules, and concurrent queue
+overflow. The original 18 lifecycle and 19 engine cases remain separate suites.
+
+```sh
+MOD_AMQP_SANITIZER_TEST=test_producer_integration \
+  sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-stage3-sanitizers /usr/local/freeswitch/lib
+```
+
+Integration always requires full eventing and asserts `switch_event_running()`.
+It does not select minimal Core. The helper instruments module/test sources,
+not the installed Core or other DSOs. ASan/UBSan/LSan and TSan passed 24/24 with
+exit 0; real network workers and live module loading remain untested. See the
+[stage 3 report](../../../../../docs/mod_amqp/filter-engine-stage3.md) for exact
+commands, limitations and the corrected interpretation of earlier fixture runs.

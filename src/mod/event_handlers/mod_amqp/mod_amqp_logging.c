@@ -122,13 +122,17 @@ switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
 
 	if (profile->name) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
-		switch_core_hash_delete(mod_amqp_globals.logging_hash, profile->name);
 	}
 
 	profile->running = 0;
 
 	if (profile->logging_thread) {
-		switch_thread_join(&status, profile->logging_thread);
+		if (switch_thread_join(&status, profile->logging_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+		profile->logging_thread = NULL;
+	}
+
+	if (profile->name && switch_core_hash_find(mod_amqp_globals.logging_hash, profile->name) == profile) {
+		switch_core_hash_delete(mod_amqp_globals.logging_hash, profile->name);
 	}
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] closing AMQP socket...\n", profile->name);
@@ -159,9 +163,13 @@ switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg)
 	mod_amqp_logging_profile_t *profile = NULL;
 	switch_xml_t params, param, connections, connection;
 	switch_threadattr_t *thd_attr = NULL;
+	switch_thread_t *worker = NULL;
+	switch_queue_t *queue = NULL;
 	char *exchange = NULL, *exchange_type = NULL;
 	int exchange_durable = 1; /* durable */
 	switch_memory_pool_t *pool;
+
+	if (zstr(name) || switch_core_hash_find(mod_amqp_globals.logging_hash, name)) return SWITCH_STATUS_GENERR;
 
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		goto err;
@@ -241,30 +249,31 @@ switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg)
 	/* We are not going to open the logging queue connection on create, but instead wait for the running thread to open it */
 
 	/* Create a bounded FIFO queue for sending messages */
-	if (switch_queue_create(&(profile->send_queue), profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_queue_create(&queue, profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create send queue of size %d!\n", profile->send_queue_size);
 		goto err;
 	}
 
+	profile->send_queue = queue;
+
 	/* Start the event send thread. This will set up the initial connection */
-	switch_threadattr_create(&thd_attr, profile->pool);
-	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-	if (switch_thread_create(&profile->logging_thread, thd_attr, mod_amqp_logging_thread, profile, profile->pool)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create 'amqp event sender' thread!\n");
+	/* Publish the owner before starting a worker, so failed join cleanup remains reachable. */
+	if (switch_core_hash_insert(mod_amqp_globals.logging_hash, name, profile) != SWITCH_STATUS_SUCCESS) goto err;
+	if (switch_threadattr_create(&thd_attr, profile->pool) != SWITCH_STATUS_SUCCESS ||
+		switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE) != SWITCH_STATUS_SUCCESS ||
+		switch_threadattr_detach_set(thd_attr, 0) != SWITCH_STATUS_SUCCESS ||
+		switch_thread_create(&worker, thd_attr, mod_amqp_logging_thread, profile, profile->pool) != SWITCH_STATUS_SUCCESS) {
 		goto err;
 	}
+	profile->logging_thread = worker;
 
-	if ( switch_core_hash_insert(mod_amqp_globals.logging_hash, name, (void *) profile) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to insert new profile [%s] into mod_amqp profile hash\n", name);
-		goto err;
-	}
-
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Profile[%s] Successfully started\n", profile->name);
 	return SWITCH_STATUS_SUCCESS;
 
  err:
 	/* Cleanup */
-	mod_amqp_logging_destroy(&profile);
+	if (mod_amqp_logging_destroy(&profile) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "AMQP logging cleanup failed; retaining owner\n");
+	}
 	return SWITCH_STATUS_GENERR;
 
 }

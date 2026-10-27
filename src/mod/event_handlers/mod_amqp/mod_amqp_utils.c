@@ -107,129 +107,140 @@ switch_bool_t mod_amqp_is_command_thread(void)
 	return SWITCH_FALSE;
 }
 
+/* All functions below run under lifecycle_mutex. List nodes outlive XML only
+ * through their owned candidates; names are copied for duplicate validation. */
+typedef struct amqp_prepared_item_s {
+	char *name;
+	mod_amqp_producer_prepared_t *prepared;
+	struct amqp_prepared_item_s *next;
+} amqp_prepared_item_t;
+
+static void amqp_prepared_set_destroy(amqp_prepared_item_t **head)
+{
+	while (*head) {
+		amqp_prepared_item_t *item = *head;
+		*head = item->next;
+		mod_amqp_producer_prepared_destroy(&item->prepared);
+		free(item->name);
+		free(item);
+	}
+}
+
+static switch_status_t amqp_prepare_set(switch_xml_t cfg, amqp_prepared_item_t **head)
+{
+	switch_xml_t profiles = switch_xml_child(cfg, "producers"), xml;
+	amqp_prepared_item_t **tail = head;
+	for (xml = profiles ? switch_xml_child(profiles, "profile") : NULL; xml; xml = xml->next) {
+		const char *name = switch_xml_attr_soft(xml, "name");
+		amqp_prepared_item_t *item, *other;
+		if (zstr(name)) return SWITCH_STATUS_GENERR;
+		for (other = *head; other; other = other->next) {
+			if (!strcmp(name, other->name)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Duplicate producer profile[%s]\n", name);
+				return SWITCH_STATUS_GENERR;
+			}
+		}
+		item = calloc(1, sizeof(*item));
+		if (!item) return SWITCH_STATUS_MEMERR;
+		*tail = item;
+		tail = &item->next;
+		item->name = strdup(name);
+		if (!item->name || mod_amqp_producer_prepare(name, xml, &item->prepared) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Try every owner once when unwinding a newly activated set. Retained profiles
+ * remain in the active hash, but must not cause an infinite first-entry loop. */
+static switch_status_t amqp_destroy_producers(switch_bool_t stop_on_error)
+{
+	switch_hash_index_t *hi;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	for (hi = switch_core_hash_first(mod_amqp_globals.producer_hash); hi;) {
+		mod_amqp_producer_profile_t *producer;
+		switch_core_hash_this(hi, NULL, NULL, (void **)&producer);
+		/* Advance before destroy deletes the current hashtable entry. */
+		hi = switch_core_hash_next(&hi);
+		if (mod_amqp_producer_destroy(&producer) != SWITCH_STATUS_SUCCESS) {
+			status = SWITCH_STATUS_GENERR;
+			if (stop_on_error) {
+				switch_safe_free(hi);
+				break;
+			}
+		}
+	}
+	return status;
+}
+
 switch_status_t mod_amqp_do_config(switch_bool_t reload)
 {
-	switch_xml_t cfg = NULL, xml = NULL, profiles = NULL, profile = NULL;
+	switch_xml_t cfg = NULL, xml = NULL, profiles, profile;
 	switch_status_t status = SWITCH_STATUS_GENERR;
+	amqp_prepared_item_t *prepared = NULL, *item;
+	switch_hash_index_t *hi = NULL;
 
-	/* Do not wait here: a concurrent teardown may be joining this API's caller
-	 * when the request came from an AMQP command worker.
-	 */
-	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP lifecycle operation already in progress\n");
-		return SWITCH_STATUS_GENERR;
-	}
-	if (mod_amqp_globals.shutting_down || (reload && mod_amqp_is_command_thread())) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot reload AMQP during shutdown or from an AMQP command worker\n");
-		goto done;
-	}
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, reload ? "Reloading Config\n" : "Loading Config\n");
-
-	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "open of amqp.conf.xml failed\n");
-		status = SWITCH_STATUS_FALSE;
-		goto done;
-	}
+	/* Never wait: teardown may be joining an AMQP command worker calling us. */
+	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+	if (mod_amqp_globals.shutting_down || (reload && mod_amqp_is_command_thread())) goto done;
+	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) goto done;
+	/* This uses the existing XML snapshot. It does not invoke reloadxml. */
+	if (amqp_prepare_set(cfg, &prepared) != SWITCH_STATUS_SUCCESS) goto done;
 
 	if (reload) {
-		switch_hash_index_t *hi = NULL;
-		mod_amqp_producer_profile_t *producer;
+		/* No new bindings until ALL old producers have been destroyed. */
+		if (amqp_destroy_producers(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) goto done;
+	} else if (!switch_core_hash_empty(mod_amqp_globals.producer_hash)) {
+		goto done;
+	}
+	for (item = prepared; item; item = item->next) {
+		if (mod_amqp_producer_activate(item->prepared) != SWITCH_STATUS_SUCCESS) {
+			/* No rollback of the old set. Cleanup includes the failed owner. */
+			amqp_destroy_producers(SWITCH_FALSE);
+			goto done;
+		}
+	}
+
+	/* Adjacent profiles are not transactional. Only touch them after producer
+	 * preparation and switching have succeeded; propagate their errors. */
+	if (reload) {
 		mod_amqp_command_profile_t *command;
 		mod_amqp_logging_profile_t *logging;
-
-		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.producer_hash, hi))) {
-			switch_core_hash_this(hi, NULL, NULL, (void **)&producer);
-			if (mod_amqp_producer_destroy(&producer) != SWITCH_STATUS_SUCCESS) {
-				switch_safe_free(hi);
-				goto done;
-			}
-		}
 		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.command_hash, hi))) {
 			switch_core_hash_this(hi, NULL, NULL, (void **)&command);
-			mod_amqp_command_destroy(&command);
+			if (mod_amqp_command_destroy(&command) != SWITCH_STATUS_SUCCESS) goto done;
 		}
-
-		switch_log_unbind_logger(mod_amqp_logging_recv);
-
+		if (mod_amqp_globals.logging_bound) {
+			if (switch_log_unbind_logger(mod_amqp_logging_recv) != SWITCH_STATUS_SUCCESS) goto done;
+			mod_amqp_globals.logging_bound = SWITCH_FALSE;
+		}
 		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.logging_hash, hi))) {
 			switch_core_hash_this(hi, NULL, NULL, (void **)&logging);
-			mod_amqp_logging_destroy(&logging);
+			if (mod_amqp_logging_destroy(&logging) != SWITCH_STATUS_SUCCESS) goto restore_logger;
 		}
-	}
-
-	if ((profiles = switch_xml_child(cfg, "producers"))) {
-		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
-
-				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
-					continue;
-				}
-
-				if ( mod_amqp_producer_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
-				}
-			}
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
-		}
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate producers section for mod_amqp\n" );
-	}
-
-	if ((profiles = switch_xml_child(cfg, "commands"))) {
-		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
-
-				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
-					continue;
-				}
-				name = switch_core_strdup(mod_amqp_globals.pool, name);
-
-				if ( mod_amqp_command_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
-				}
-			}
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
-		}
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate commands section for mod_amqp\n" );
-	}
-
-	if ((profiles = switch_xml_child(cfg, "logging"))) {
-		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
-
-				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
-					continue;
-				}
-				name = switch_core_strdup(mod_amqp_globals.pool, name);
-
-				if ( mod_amqp_logging_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
-				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
-				}
-			}
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
-		}
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate logging section for mod_amqp\n" );
 	}
 
 	status = SWITCH_STATUS_SUCCESS;
+	profiles = switch_xml_child(cfg, "commands");
+	for (profile = profiles ? switch_xml_child(profiles, "profile") : NULL; profile; profile = profile->next) {
+		const char *name = switch_xml_attr_soft(profile, "name");
+		if (zstr(name) || switch_core_hash_find(mod_amqp_globals.command_hash, name) ||
+			mod_amqp_command_create((char *)name, profile) != SWITCH_STATUS_SUCCESS) status = SWITCH_STATUS_GENERR;
+	}
+	profiles = switch_xml_child(cfg, "logging");
+	for (profile = profiles ? switch_xml_child(profiles, "profile") : NULL; profile; profile = profile->next) {
+		const char *name = switch_xml_attr_soft(profile, "name");
+		if (zstr(name) || switch_core_hash_find(mod_amqp_globals.logging_hash, name) ||
+			mod_amqp_logging_create((char *)name, profile) != SWITCH_STATUS_SUCCESS) status = SWITCH_STATUS_GENERR;
+	}
+restore_logger:
+	if (!mod_amqp_globals.logging_bound) {
+		if (switch_log_bind_logger(mod_amqp_logging_recv, SWITCH_LOG_DEBUG, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS) {
+			mod_amqp_globals.logging_bound = SWITCH_TRUE;
+		} else status = SWITCH_STATUS_GENERR;
+	}
 done:
+	switch_safe_free(hi);
+	amqp_prepared_set_destroy(&prepared);
 	if (xml) switch_xml_free(xml);
 	switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
 	return status;

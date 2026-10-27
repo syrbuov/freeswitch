@@ -72,13 +72,17 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_apqp loading: Version %s\n", switch_version_full());
 
 	/* Create producer profiles */
-	if ( mod_amqp_do_config(SWITCH_FALSE) != SWITCH_STATUS_SUCCESS ){
-		return SWITCH_STATUS_GENERR;
+	if (mod_amqp_do_config(SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+		if (mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+		/* Core accepts NOUNLOAD on load and pins the DSO. Retained callback or
+		 * worker resources must never point into an unloaded module. */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "AMQP configuration failed and cleanup retained resources; pinning module\n");
+		SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
+		return SWITCH_STATUS_NOUNLOAD;
 	}
 
 	SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
 
-	switch_log_bind_logger(mod_amqp_logging_recv, SWITCH_LOG_DEBUG, SWITCH_FALSE);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -117,13 +121,27 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_amqp_shutdown)
 
 	while ((hi = switch_core_hash_first_iter(mod_amqp_globals.command_hash, hi))) {
 		switch_core_hash_this(hi, NULL, NULL, (void **)&command);
-		mod_amqp_command_destroy(&command);
+		if (mod_amqp_command_destroy(&command) != SWITCH_STATUS_SUCCESS) {
+			switch_safe_free(hi);
+			switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+			return SWITCH_STATUS_NOUNLOAD;
+		}
 	}
 
-	switch_log_unbind_logger(mod_amqp_logging_recv);
+	if (mod_amqp_globals.logging_bound) {
+		if (switch_log_unbind_logger(mod_amqp_logging_recv) != SWITCH_STATUS_SUCCESS) {
+			switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+			return SWITCH_STATUS_NOUNLOAD;
+		}
+		mod_amqp_globals.logging_bound = SWITCH_FALSE;
+	}
 	while ((hi = switch_core_hash_first_iter(mod_amqp_globals.logging_hash, hi))) {
 		switch_core_hash_this(hi, NULL, NULL, (void **)&logging);
-		mod_amqp_logging_destroy(&logging);
+		if (mod_amqp_logging_destroy(&logging) != SWITCH_STATUS_SUCCESS) {
+			switch_safe_free(hi);
+			switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+			return SWITCH_STATUS_NOUNLOAD;
+		}
 	}
 
 	switch_core_hash_destroy(&(mod_amqp_globals.producer_hash));

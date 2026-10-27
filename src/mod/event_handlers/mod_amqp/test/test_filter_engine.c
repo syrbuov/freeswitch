@@ -164,6 +164,8 @@ FST_BEGIN()
 	 * Sanitizer runs may select minimal Core to isolate unrelated subsystems.
 	 * All engine tests, including real reader threads, still run unchanged. */
 	int minimal = getenv("MOD_AMQP_FILTER_TEST_MINIMAL") != NULL;
+	/* Prevent the empty-module-list fallback from loading installed DSOs. */
+	SWITCH_GLOBAL_dirs.mod_dir = strdup(SWITCH_TEST_BASE_DIR_FOR_CONF "/conf");
 	if (fst_init_core_and_modload("conf", NULL, minimal, SCF_LOG_DISABLE) != SWITCH_STATUS_SUCCESS) exit(1);
 	{
 	FST_SUITE_BEGIN(mod_amqp_filter_engine)

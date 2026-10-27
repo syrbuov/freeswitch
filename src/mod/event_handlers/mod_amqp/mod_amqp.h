@@ -40,6 +40,7 @@
 #define MOD_AMQP_H
 
 #include <switch.h>
+#include "mod_amqp_filter.h"
 #include <amqp.h>
 #include <amqp_framing.h>
 #include <amqp_tcp_socket.h>
@@ -92,8 +93,23 @@ typedef struct {
   char* subclass;
 } mod_amqp_events_t;
 
+typedef enum {
+  MOD_AMQP_FILTER_LEGACY = 0, MOD_AMQP_FILTER_RULES
+} mod_amqp_filter_mode_t;
+
+typedef enum {
+  MOD_AMQP_PRODUCER_PREPARED, MOD_AMQP_PRODUCER_ACTIVATING,
+  MOD_AMQP_PRODUCER_ACTIVE, MOD_AMQP_PRODUCER_RETAINED
+} mod_amqp_producer_state_t;
+
+typedef struct mod_amqp_producer_prepared_s mod_amqp_producer_prepared_t;
+
 typedef struct {
   char *name;
+  mod_amqp_filter_mode_t filter_mode;
+  mod_amqp_filter_engine_t *filter_engine;
+  /* Management-only state. Callback readiness is published before binding. */
+  mod_amqp_producer_state_t activation_state;
 
   char *exchange;
   char *exchange_type;
@@ -130,7 +146,7 @@ typedef struct {
   switch_time_t circuit_breaker_reset_time;
   switch_bool_t enable_fallback_format_fields;
 
-  /* Protects running only; never held across unbind, join or AMQP I/O. */
+  /* Protects running and circuit_breaker_reset_time; never held across unbind, join or AMQP I/O. */
   switch_mutex_t *state_mutex;
   switch_bool_t running;
   switch_memory_pool_t *pool;
@@ -199,6 +215,7 @@ typedef struct mod_amqp_globals_s {
   /* Management only: never acquired by producer callbacks or sender threads. */
   switch_mutex_t *lifecycle_mutex;
   switch_bool_t shutting_down;
+  switch_bool_t logging_bound;
 
   switch_hash_t *producer_hash;
   switch_hash_t *command_hash;
@@ -215,6 +232,8 @@ int mod_amqp_count_chars(const char* string, char ch);
 void mod_amqp_util_msg_destroy(mod_amqp_message_t **msg);
 
 /* connection */
+/* Pure configuration parsing: no AMQP handles, sockets or I/O. */
+switch_status_t mod_amqp_connection_parse(mod_amqp_connection_t *config, switch_xml_t cfg, switch_memory_pool_t *pool);
 switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_xml_t cfg, switch_memory_pool_t *pool);
 void mod_amqp_connection_destroy(mod_amqp_connection_t **conn);
 void mod_amqp_connection_close(mod_amqp_connection_t *connection);
@@ -232,6 +251,11 @@ switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profi
 					      switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[]);
 switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **profile);
 switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg);
+/* Preparation owns an unpublished candidate. Activation consumes it exactly once,
+ * even on failure; a failed cleanup leaves the owner in producer_hash. */
+switch_status_t mod_amqp_producer_prepare(const char *name, switch_xml_t cfg, mod_amqp_producer_prepared_t **out);
+switch_status_t mod_amqp_producer_activate(mod_amqp_producer_prepared_t *prepared);
+void mod_amqp_producer_prepared_destroy(mod_amqp_producer_prepared_t **prepared);
 void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void *data);
 
 char *amqp_util_encode(char *key, char *dest);

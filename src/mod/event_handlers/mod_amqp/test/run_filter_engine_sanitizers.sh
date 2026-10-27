@@ -1,5 +1,6 @@
 #!/bin/sh
-# Standalone test binaries only. Does not install modules or build Core.
+# Isolated test binaries only. Integration uses full Core eventing; standalone
+# engine may use minimal Core. Does not install modules or build Core.
 set -eu
 
 amqp_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -10,9 +11,20 @@ mkdir -p "$amqp_output_dir"
 amqp_output_dir=$(CDPATH= cd -- "$amqp_output_dir" && pwd)
 amqp_core_libdir=$(CDPATH= cd -- "$amqp_core_libdir" && pwd)
 amqp_failed=0
+amqp_test=${MOD_AMQP_SANITIZER_TEST:-test_filter_engine}
+case "$amqp_test" in
+	test_filter_engine) ;;
+	test_producer_integration) ;;
+	*) printf "Unsupported test: %s\n" "$amqp_test" >&2; exit 2 ;;
+esac
 
 for amqp_sanitizer in address,undefined thread; do
-	amqp_binary="$amqp_output_dir/test_filter_engine_$amqp_sanitizer"
+	amqp_binary="$amqp_output_dir/${amqp_test}_$amqp_sanitizer"
+	set --
+	if [ "$amqp_test" = test_producer_integration ]; then
+		set -- "$amqp_dir/mod_amqp_connection.c" "$amqp_dir/mod_amqp_filter_parser.c" \
+			"$amqp_dir/mod_amqp_filter_compiler.c" "$amqp_dir/mod_amqp_filter_matcher.c"
+	fi
 	if "${CC:-cc}" -DHAVE_CONFIG_H -I"$amqp_dir" -I"$amqp_source_root/src/include" \
 		-I"$amqp_source_root/libs/esl/src/include" -I"$amqp_source_root/libs/xmlrpc-c" \
 		-I"$amqp_source_root/libs/libteletone/src" \
@@ -21,7 +33,7 @@ for amqp_sanitizer in address,undefined thread; do
 		-Wdeclaration-after-statement -g -O1 -fno-omit-frame-pointer "-fsanitize=$amqp_sanitizer" \
 		"-DSWITCH_TEST_BASE_DIR_FOR_CONF=\"$amqp_dir/test\"" \
 		"-DSWITCH_TEST_BASE_DIR_OVERRIDE=\"$amqp_dir/test\"" \
-		"$amqp_dir/test/test_filter_engine.c" "$amqp_core_libdir/libfreeswitch.so" \
+		"$amqp_dir/test/$amqp_test.c" "$@" "$amqp_core_libdir/libfreeswitch.so" -lrabbitmq \
 		"-Wl,-rpath,$amqp_core_libdir" -lssl -lcrypto -lpthread -o "$amqp_binary" \
 		> "$amqp_binary.build.log" 2>&1; then
 		if MOD_AMQP_FILTER_TEST_MINIMAL=1 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \

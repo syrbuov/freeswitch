@@ -192,9 +192,8 @@ err:
     return SWITCH_STATUS_GENERR;
 }
 
-switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_xml_t cfg, switch_memory_pool_t *pool)
+switch_status_t mod_amqp_connection_parse(mod_amqp_connection_t *new_con, switch_xml_t cfg, switch_memory_pool_t *pool)
 {
-	mod_amqp_connection_t *new_con = switch_core_alloc(pool, sizeof(mod_amqp_connection_t));
 	switch_xml_t param;
 	char *name = (char *) switch_xml_attr_soft(cfg, "name");
 	char *hostname = NULL, *virtualhost = NULL, *username = NULL, *password = NULL;
@@ -263,9 +262,15 @@ switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_
 	new_con->ssl_on = ssl_on;
 	new_con->ssl_verify_peer = ssl_verify_peer;
 
-	*conn = new_con;
-
 	return SWITCH_STATUS_SUCCESS;
+}
+
+switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_xml_t cfg, switch_memory_pool_t *pool)
+{
+	mod_amqp_connection_t *config = switch_core_alloc(pool, sizeof(*config));
+	switch_status_t status = mod_amqp_connection_parse(config, cfg, pool);
+	if (status == SWITCH_STATUS_SUCCESS) *conn = config;
+	return status;
 }
 
 void mod_amqp_connection_destroy(mod_amqp_connection_t **conn)
