@@ -87,7 +87,7 @@ for successful runs and the separate sanitizer failures with full Core.
 
 ## Producer integration (stage 3)
 
-`test/test_producer_integration.c` selects 24 integration cases using the shared
+`test/test_producer_integration.c` selects 24 producer cases using the shared
 lifecycle fixture. It includes the production producer, configuration, module,
 command and logging code with test-local wrappers; connection settings and
 engine sources are compiled separately. It exercises real Core bindings/unbind,
@@ -101,6 +101,16 @@ cleanup, retained engines and reader/sender barriers, API error propagation,
 logger rebinding, all concrete subscriptions, 1024 rules, and concurrent queue
 overflow. The original 18 lifecycle and 19 engine cases remain separate suites.
 
+Five additional cases exercise the `amqp` API reply through the real
+`mod_event_socket` listener and Core `switch_api_execute()` in the isolated
+integration process. A test-only proxy DSO registers the executable's
+`amqp_reload()` function in Core; it does not replace the handler. ESL binds
+only to `127.0.0.1:28741` with the password in `test/conf/freeswitch.xml`.
+The suite needs an installed `mod_event_socket.so` compatible with the selected
+Core. It tests success, invalid mode, busy lifecycle mutex, teardown failure
+and activation failure. The production service and its configuration are not
+loaded by this fixture.
+
 ```sh
 MOD_AMQP_SANITIZER_TEST=test_producer_integration \
   sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-stage3-sanitizers /usr/local/freeswitch/lib
@@ -108,7 +118,8 @@ MOD_AMQP_SANITIZER_TEST=test_producer_integration \
 
 Integration always requires full eventing and asserts `switch_event_running()`.
 It does not select minimal Core. The helper instruments module/test sources,
-not the installed Core or other DSOs. ASan/UBSan/LSan and TSan passed 24/24 with
-exit 0; real network workers and live module loading remain untested. See the
+not the installed Core or `mod_event_socket` DSO. ASan/UBSan/LSan and TSan
+passed 29/29 with exit 0 on 2026-10-27; real AMQP network workers and live
+installation of the new module remain untested. See the
 [stage 3 report](../../../../../docs/mod_amqp/filter-engine-stage3.md) for exact
 commands, limitations and the corrected interpretation of earlier fixture runs.

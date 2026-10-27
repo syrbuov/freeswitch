@@ -120,8 +120,19 @@ static switch_status_t integration_profile(const char *name, const char *body)
 
 static switch_status_t integration_reload(const char *snapshot)
 {
+	switch_stream_handle_t stream = { 0 };
+	switch_status_t status;
 	config_snapshot = snapshot;
-	return amqp_reload(NULL, NULL, NULL);
+	SWITCH_STANDARD_STREAM(stream);
+	status = amqp_reload(NULL, NULL, &stream);
+	if (status == SWITCH_STATUS_SUCCESS && stream.data &&
+		!strcmp((const char *)stream.data, "+OK mod_amqp configuration reloaded\n")) {
+		status = SWITCH_STATUS_SUCCESS;
+	} else {
+		status = SWITCH_STATUS_GENERR;
+	}
+	switch_safe_free(stream.data);
+	return status;
 }
 
 static mod_amqp_producer_profile_t *integration_find(const char *name)

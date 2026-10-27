@@ -46,7 +46,15 @@ mod_amqp_globals_t mod_amqp_globals;
 
 SWITCH_STANDARD_API(amqp_reload)
 {
-  return mod_amqp_do_config(SWITCH_TRUE);
+	/* Core appends a generic error for non-success API status; ESL replaces
+	 * that stream with "Command not found". Report the reload operation in
+	 * the stream and return success for the completed API invocation. */
+	if (mod_amqp_do_config(SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
+		stream->write_function(stream, "+OK mod_amqp configuration reloaded\n");
+	} else {
+		stream->write_function(stream, "-ERR mod_amqp configuration reload failed\n");
+	}
+	return SWITCH_STATUS_SUCCESS;
 }
 
 

@@ -7,6 +7,9 @@
  */
 #include "mod_amqp.h"
 #include <test/switch_test.h>
+#ifdef MOD_AMQP_INTEGRATION
+#include <dlfcn.h>
+#endif
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_amqp_shutdown);
 
@@ -279,6 +282,10 @@ static void deliver(switch_event_types_t id, const char *subclass)
 	switch_event_deliver(&event);
 }
 
+#ifdef MOD_AMQP_INTEGRATION
+#include "api_reply_helpers.h"
+#endif
+
 static void *SWITCH_THREAD_FUNC delivery_thread(switch_thread_t *thread, void *data)
 {
 	(void)data;
@@ -321,6 +328,36 @@ FST_BEGIN()
 	}
 
 	switch_assert(switch_event_running() == SWITCH_STATUS_SUCCESS);
+
+#ifdef MOD_AMQP_INTEGRATION
+	/* Register the executable's API handler in Core, then run the installed
+	 * event_socket module only inside this isolated process. */
+	{
+		const char *err = NULL;
+		const char *socket_dir = getenv("MOD_AMQP_EVENT_SOCKET_DIR");
+		void *proxy, *symbol;
+		void (*set_handler)(switch_status_t (*)(const char *, switch_core_session_t *, switch_stream_handle_t *));
+		if (switch_loadable_module_load_module(MOD_AMQP_API_PROXY_DIR,
+			"mod_amqp_api_reply_proxy", SWITCH_FALSE, &err) != SWITCH_STATUS_SUCCESS) {
+			fprintf(stderr, "Cannot load isolated API/ESL test modules: %s\n", err ? err : "unknown");
+			exit(1);
+		}
+		proxy = dlopen(MOD_AMQP_API_PROXY_DIR "/mod_amqp_api_reply_proxy.so", RTLD_NOW | RTLD_NOLOAD);
+		symbol = proxy ? dlsym(proxy, "mod_amqp_api_reply_proxy_set_handler") : NULL;
+		if (!symbol || sizeof(set_handler) != sizeof(symbol)) {
+			fprintf(stderr, "Cannot find isolated API test handler setter\n");
+			exit(1);
+		}
+		memcpy(&set_handler, &symbol, sizeof(set_handler));
+		set_handler(amqp_reload);
+		dlclose(proxy);
+		if (switch_loadable_module_load_module(socket_dir ? socket_dir : "/usr/local/freeswitch/mod",
+			"mod_event_socket", SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) {
+			fprintf(stderr, "Cannot load isolated ESL module: %s\n", err ? err : "unknown");
+			exit(1);
+		}
+	}
+#endif
 
 	/* FST_SUITE_BEGIN declares its context; keep it at the start of a scope. */
 	{
@@ -373,6 +410,7 @@ FST_BEGIN()
 
 #ifdef MOD_AMQP_INTEGRATION
 #include "producer_integration_cases.h"
+#include "api_reply_cases.h"
 #else
 		FST_TEST_BEGIN(null_and_repeated_destroy)
 		{
