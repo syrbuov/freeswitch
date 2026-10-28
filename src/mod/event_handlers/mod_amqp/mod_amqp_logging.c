@@ -44,6 +44,7 @@ static void mod_amqp_logging_set_running(mod_amqp_logging_profile_t *profile, sw
 {
 	switch_mutex_lock(profile->mutex);
 	profile->running = running;
+	if (!running && profile->stop_cond) switch_thread_cond_broadcast(profile->stop_cond);
 	switch_mutex_unlock(profile->mutex);
 }
 
@@ -105,22 +106,32 @@ switch_status_t mod_amqp_logging_recv(const switch_log_node_t *node, switch_log_
 			/* Create message */
 			switch_malloc(msg, sizeof(mod_amqp_message_t));
 			msg->pjson = strdup(json);
-			strcpy(file, node->file);
+			switch_copy_string(file, node->file, sizeof(file));
 			switch_replace_char(file, '.', '_', 0);
 
 			snprintf(msg->routing_key, sizeof(msg->routing_key), "%s.%s.%s.%s", switch_core_get_hostname(), node->userdata, switch_log_level2str(node->level), file);
 
 			if (switch_queue_trypush(logging->send_queue, msg) != SWITCH_STATUS_SUCCESS) {
+				mod_amqp_io_count(&logging->io, MOD_AMQP_DROPPED);
+				mod_amqp_util_msg_destroy(&msg);
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP logging message queue full. Messages will be dropped!\n");
 				switch_safe_free(hi);
 				goto done;
 			}
+			mod_amqp_io_count(&logging->io, MOD_AMQP_ENQUEUED);
 		}
 	}
 
  done:
 	switch_safe_free(json);
 	return SWITCH_STATUS_SUCCESS;
+}
+
+void mod_amqp_logging_stop(mod_amqp_logging_profile_t *profile)
+{
+	if (profile->mutex) mod_amqp_logging_set_running(profile, SWITCH_FALSE);
+	if (profile->send_queue) switch_queue_interrupt_all(profile->send_queue);
+	mod_amqp_io_stop(&profile->io);
 }
 
 switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
@@ -142,9 +153,7 @@ switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
 	}
 
-	if (profile->mutex) {
-		mod_amqp_logging_set_running(profile, SWITCH_FALSE);
-	} /* A failed mutex init cannot have started a worker. */
+	mod_amqp_logging_stop(profile);
 
 	if (profile->logging_thread) {
 		if (switch_thread_join(&status, profile->logging_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
@@ -166,6 +175,7 @@ switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
 	profile->conn_root = NULL;
 
 	while (profile->send_queue && switch_queue_trypop(profile->send_queue, (void**)&msg) == SWITCH_STATUS_SUCCESS) {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
 		mod_amqp_util_msg_destroy(&msg);
 	}
 
@@ -202,11 +212,18 @@ switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg)
 		profile->mutex = NULL;
 		goto err;
 	}
+	if (switch_thread_cond_create(&profile->stop_cond, pool) != SWITCH_STATUS_SUCCESS) {
+		profile->stop_cond = NULL;
+		goto err;
+	}
+	profile->io.mutex = profile->mutex;
+	profile->io.fd = -1;
 	mod_amqp_logging_set_running(profile, SWITCH_TRUE);
 	profile->conn_root   = NULL;
 	profile->conn_active = NULL;
 	profile->log_level_mask = 0;
 	profile->send_queue_size = 5000;
+	profile->reconnect_interval_ms = 1000;
 
 	if ((params = switch_xml_child(cfg, "params")) != NULL) {
 		for (param = switch_xml_child(params, "param"); param; param = param->next) {
@@ -329,16 +346,19 @@ switch_status_t mod_amqp_logging_send(mod_amqp_logging_profile_t *profile, mod_a
 								amqp_cstring_bytes(msg->pjson));
 
 	if (status < 0) {
-		const char *errstr = amqp_error_string2(-status);
+		const char *errstr = amqp_error_string2(status);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] failed to send event on connection[%s]: %s\n",
 						  profile->name, profile->conn_active->name, errstr);
 
+		mod_amqp_io_count(&profile->io, MOD_AMQP_PUBLISH_ERRORS);
+		mod_amqp_io_state(&profile->io, MOD_AMQP_IO_DISCONNECTED, "publish");
 		/* This is bad, we couldn't send the message. Clear up any connection */
 		mod_amqp_connection_close(profile->conn_active);
 		profile->conn_active = NULL;
 		return SWITCH_STATUS_SOCKERR;
 	}
 
+	mod_amqp_io_count(&profile->io, MOD_AMQP_PUBLISH_OK);
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -352,11 +372,12 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
   amqp_boolean_t passive = 0;
   amqp_boolean_t durable = 1;
 
+  mod_amqp_io_worker(&profile->io, SWITCH_TRUE);
   while (mod_amqp_logging_is_running(profile)) {
     if (!profile->conn_active) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");
 
-      status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr);
+      status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr, &profile->io);
       if ( status	== SWITCH_STATUS_SUCCESS ) {
 		  // Ensure that the exchange exists, and is of the correct type
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
@@ -378,14 +399,20 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
 #endif
 
 	if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring exchange")) {
+	  mod_amqp_io_state(&profile->io, MOD_AMQP_IO_READY, NULL);
 	  switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
 	  continue;
 	}
+        mod_amqp_io_count(&profile->io, MOD_AMQP_CONNECT_FAILURES);
+        mod_amqp_io_state(&profile->io, MOD_AMQP_IO_DISCONNECTED, "exchange_declare");
+        mod_amqp_connection_close(profile->conn_active);
+        profile->conn_active = NULL;
+        status = SWITCH_STATUS_GENERR;
       }
 
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to connect with code(%d), sleeping for %dms\n",
 			profile->name, status, profile->reconnect_interval_ms);
-      switch_sleep(profile->reconnect_interval_ms * 1000);
+      mod_amqp_worker_wait(profile->mutex, profile->stop_cond, &profile->running, profile->reconnect_interval_ms);
       continue;
     }
 
@@ -393,7 +420,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
       continue;
     }
 
-    if (msg) {
+    if (msg && mod_amqp_logging_is_running(profile)) {
       switch (mod_amqp_logging_send(profile, msg)) {
       case SWITCH_STATUS_SUCCESS:
 	/* Success: prepare for next message */
@@ -406,6 +433,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
 
       case SWITCH_STATUS_SOCKERR:
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'socket error'\n");
+        mod_amqp_worker_wait(profile->mutex, profile->stop_cond, &profile->running, profile->reconnect_interval_ms);
 	break;
 
       default:
@@ -419,7 +447,9 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
   }
 
   /* Abort the current message */
+  if (msg) mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
   mod_amqp_util_msg_destroy(&msg);
+  mod_amqp_io_worker(&profile->io, SWITCH_FALSE);
 
   // Terminate the thread
   switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Event sender thread stopped\n");

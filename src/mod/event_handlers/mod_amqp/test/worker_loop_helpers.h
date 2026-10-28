@@ -2,9 +2,9 @@
  * Included only by the isolated integration executable. */
 
 static switch_status_t integration_connection_open(mod_amqp_connection_t *connections,
-	mod_amqp_connection_t **active, char *name, char *custom_attr)
+	mod_amqp_connection_t **active, char *name, char *custom_attr, mod_amqp_io_t *io)
 {
-	(void)connections; (void)active; (void)name; (void)custom_attr;
+	(void)connections; (void)active; (void)name; (void)custom_attr; (void)io;
 	switch_mutex_lock(test_mutex);
 	worker_io_entered++;
 	switch_thread_cond_broadcast(test_cond);
@@ -39,6 +39,13 @@ static void integration_worker_sleep(switch_interval_time_t interval)
 	switch_sleep(1000);
 }
 
+static void integration_worker_wait(switch_mutex_t *mutex, switch_thread_cond_t *cond,
+								   switch_bool_t *running, int milliseconds)
+{
+	set_counter(&worker_sleep_entered, read_counter(&worker_sleep_entered) + 1);
+	mod_amqp_worker_wait(mutex, cond, running, milliseconds);
+}
+
 static switch_status_t integration_queue_pop_timeout(switch_queue_t *queue, void **data,
 	switch_interval_time_t timeout)
 {
@@ -55,7 +62,8 @@ static switch_status_t integration_queue_pop_timeout(switch_queue_t *queue, void
 
 static switch_status_t worker_create_profile(switch_bool_t command)
 {
-	switch_xml_t xml = switch_xml_parse_str_dynamic("<profile/>", SWITCH_TRUE);
+	switch_xml_t xml = switch_xml_parse_str_dynamic(
+		"<profile><params><param name='reconnect_interval_ms' value='60000'/></params></profile>", SWITCH_TRUE);
 	switch_status_t status;
 	switch_assert(xml);
 	switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);

@@ -191,8 +191,8 @@ FST_TEST_END()
 
 FST_TEST_BEGIN(held_callback_blocks_engine_destruction_and_reload_shutdown)
 {
-	switch_thread_t *delivery, *destroyer;
-	switch_status_t status;
+	switch_thread_t *delivery, *destroyer, *shutdown_thread;
+	switch_status_t status, shutdown_status = SWITCH_STATUS_GENERR;
 	destroy_context_t context;
 	fst_check(integration_profile("held", RULE_DTMF) == SWITCH_STATUS_SUCCESS);
 	context.profile = integration_find("held");
@@ -203,9 +203,13 @@ FST_TEST_BEGIN(held_callback_blocks_engine_destruction_and_reload_shutdown)
 	fst_check(await_counter(&unbind_calls, 1));
 	fst_check(read_counter(&engines_destroyed) == 0 && !read_counter(&destroy_done));
 	fst_check(mod_amqp_do_config(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS);
-	fst_check(mod_amqp_shutdown() == SWITCH_STATUS_NOUNLOAD);
+	switch_assert(switch_thread_create(&shutdown_thread, NULL, integration_shutdown_thread, &shutdown_status, fst_pool) == SWITCH_STATUS_SUCCESS);
+	fst_check(await_counter(&shutdown_entered, 1));
+	fst_check(!read_counter(&shutdown_done));
 	set_counter(&release_callback, 1);
 	switch_thread_join(&status, delivery); switch_thread_join(&status, destroyer);
+	switch_thread_join(&status, shutdown_thread);
+	fst_check(shutdown_status == SWITCH_STATUS_SUCCESS);
 	fst_check(context.status == SWITCH_STATUS_SUCCESS && context.profile == NULL);
 	fst_check(read_counter(&engines_destroyed) == 1);
 }
@@ -391,20 +395,124 @@ FST_TEST_BEGIN(adjacent_creation_and_join_failures_reach_api)
 	const char *commands = "<configuration><commands><profile name='command'/></commands></configuration>";
 	const char *logging = "<configuration><logging><profile name='log'/></logging></configuration>";
 	fail_other_thread = 1;
-	fst_check(integration_reload(commands) != SWITCH_STATUS_SUCCESS);
+	fst_check(integration_reload(commands) == SWITCH_STATUS_SUCCESS);
 	fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
 	fst_check(integration_reload(logging) != SWITCH_STATUS_SUCCESS);
 	fst_check(switch_core_hash_empty(mod_amqp_globals.logging_hash));
 	fail_other_thread = 0;
 	fst_check(integration_reload(commands) == SWITCH_STATUS_SUCCESS);
-	fail_join = 1;
-	fst_check(integration_reload("<configuration/>") != SWITCH_STATUS_SUCCESS);
-	fst_check(switch_core_hash_find(mod_amqp_globals.command_hash, "command") != NULL);
+	fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
+	fst_check(integration_reload("<configuration/>") == SWITCH_STATUS_SUCCESS);
 	fst_check(integration_reload(logging) == SWITCH_STATUS_SUCCESS);
 	fail_join = 1;
 	fst_check(integration_reload("<configuration/>") != SWITCH_STATUS_SUCCESS);
 	fst_check(switch_core_hash_find(mod_amqp_globals.logging_hash, "log") != NULL);
 	fst_check(mod_amqp_globals.logging_bound);
 	fst_check(integration_reload("<configuration/>") == SWITCH_STATUS_SUCCESS);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(invalid_network_timeout_preserves_active_producers)
+{
+    const char *values[] = {"0", "-1", "60001", "not-a-number", "999999999999999999999999", NULL};
+    char snapshot[2048];
+    mod_amqp_producer_profile_t *old;
+    int i;
+    fst_check(integration_profile("old", RULE_DTMF) == SWITCH_STATUS_SUCCESS);
+    old = integration_find("old");
+    for (i = 0; values[i]; i++) {
+        switch_snprintf(snapshot, sizeof(snapshot),
+            "<configuration><producers><profile name='new'><connections><connection name='net'>"
+            "<param name='connect-timeout-ms' value='%s'/></connection></connections>"
+            RULE_DTMF "</profile></producers></configuration>", values[i]);
+        fst_check(integration_reload(snapshot) != SWITCH_STATUS_SUCCESS);
+        fst_check(integration_find("old") == old && read_counter(&unbind_calls) == 0);
+    }
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(shutdown_error_does_not_leave_other_workers_running)
+{
+    switch_hash_index_t *hi;
+    mod_amqp_producer_profile_t *retained;
+    fst_check(integration_reload("<configuration><producers>" PROFILE_NEW
+        "<profile name='other'>" RULE_DTMF "</profile></producers>"
+        "<logging><profile name='log'/></logging></configuration>") == SWITCH_STATUS_SUCCESS);
+    fail_unbind = 1;
+    fst_check(mod_amqp_shutdown() == SWITCH_STATUS_NOUNLOAD);
+    fst_check(mod_amqp_globals.health == MOD_AMQP_HEALTH_RESTART_REQUIRED);
+    fst_check(switch_core_hash_empty(mod_amqp_globals.logging_hash));
+    fst_check(!mod_amqp_globals.logging_bound && read_counter(&engines_destroyed) == 1);
+    hi = switch_core_hash_first(mod_amqp_globals.producer_hash);
+    fst_check(hi != NULL);
+    switch_core_hash_this(hi, NULL, NULL, (void **)&retained);
+    switch_safe_free(hi);
+    fst_check(!mod_amqp_producer_is_running(retained) && !retained->producer_thread);
+    fst_check(mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS);
+    fst_check(read_counter(&engines_destroyed) == 2);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(routing_key_empty_missing_and_encoded_boundaries)
+{
+    mod_amqp_producer_profile_t profile = {0};
+    switch_event_t *event = NULL;
+    char key[MAX_AMQP_ROUTING_KEY_LENGTH + 1], value[257];
+    switch_assert(switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS);
+    memset(key, 0xbe, sizeof(key));
+    fst_check(mod_amqp_producer_routing_key(&profile, key, event, profile.format_fields) == SWITCH_STATUS_SUCCESS);
+    fst_check_string_equals(key, "");
+    profile.format_fields[0].size = 1;
+    profile.format_fields[0].name[0] = "missing";
+    memset(key, 0xbe, sizeof(key));
+    fst_check(mod_amqp_producer_routing_key(&profile, key, event, profile.format_fields) == SWITCH_STATUS_SUCCESS);
+    fst_check_string_equals(key, "");
+    profile.format_fields[0].name[0] = "route";
+    memset(value, '.', 85); value[85] = '\0';
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "route", value);
+    fst_check(mod_amqp_producer_routing_key(&profile, key, event, profile.format_fields) == SWITCH_STATUS_SUCCESS);
+    fst_check(strlen(key) == 255 && key[255] == '\0' && !memcmp(key, "%2E", 3));
+    switch_event_del_header(event, "route");
+    value[85] = '.'; value[86] = '\0';
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "route", value);
+    fst_check(mod_amqp_producer_routing_key(&profile, key, event, profile.format_fields) != SWITCH_STATUS_SUCCESS);
+    fst_check_string_equals(key, "");
+    switch_event_del_header(event, "route");
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "route", "a b.\xc3\xa9");
+    fst_check(mod_amqp_producer_routing_key(&profile, key, event, profile.format_fields) == SWITCH_STATUS_SUCCESS);
+    fst_check_string_equals(key, "a+b%2E%C3%A9");
+    switch_event_destroy(&event);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(oversized_routing_key_is_dropped_before_json)
+{
+    mod_amqp_producer_profile_t *profile;
+    switch_event_t *event = NULL;
+    char literal[258];
+    fst_check(integration_profile("route", RULE_DTMF) == SWITCH_STATUS_SUCCESS);
+    profile = integration_find("route");
+    memset(literal, 'x', sizeof(literal)); literal[0] = '#'; literal[257] = '\0';
+    profile->format_fields[0].name[0] = literal;
+    switch_assert(switch_event_create(&event, SWITCH_EVENT_DTMF) == SWITCH_STATUS_SUCCESS);
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "AMQP-Lifecycle-Test", "true");
+    switch_event_deliver(&event);
+    fst_check(read_counter(&message_allocations) == 1 && read_counter(&serialized) == 0 && read_counter(&enqueue_calls) == 0);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(logging_queue_overflow_releases_rejected_message)
+{
+    mod_amqp_logging_profile_t *logging;
+    fst_check(integration_reload("<configuration><logging><profile name='bounded'><params>"
+        "<param name='send_queue_size' value='1'/><param name='log-levels' value='err'/>"
+        "</params></profile></logging></configuration>") == SWITCH_STATUS_SUCCESS);
+    logging = switch_core_hash_find(mod_amqp_globals.logging_hash, "bounded");
+    fst_check(logging != NULL);
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "amqp-integration-log-marker overflow 1\n");
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "amqp-integration-log-marker overflow 2\n");
+    fst_check(await_counter(&logger_seen, 2));
+    fst_check(switch_queue_size(logging->send_queue) == 1);
+    /* LSan checks the rejected JSON/message after the fixture drains the queue. */
 }
 FST_TEST_END()

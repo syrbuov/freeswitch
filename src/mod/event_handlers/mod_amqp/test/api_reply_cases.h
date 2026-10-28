@@ -111,3 +111,69 @@ FST_TEST_BEGIN(api_reply_activation_error_over_esl)
 	fst_check(switch_core_hash_empty(mod_amqp_globals.producer_hash));
 }
 FST_TEST_END()
+
+FST_TEST_BEGIN(api_profiles_snapshot_and_unknown_command_are_read_only)
+{
+    char reply[4096] = {0};
+    cJSON *json, *profile;
+    fst_check(integration_reload(CONFIG_NEW) == SWITCH_STATUS_SUCCESS);
+    deliver(SWITCH_EVENT_DTMF, NULL);
+    fst_check(api_reply_request_command("api amqp profiles\n\n", reply, sizeof(reply)) == 0);
+    fst_check(strstr(reply, "+OK mod_amqp profiles\n") == reply);
+    json = cJSON_Parse(strchr(reply, '\n') + 1);
+    fst_check(json != NULL);
+    profile = cJSON_GetArrayItem(cJSON_GetObjectItem(json, "producers"), 0);
+    fst_check(profile != NULL);
+    fst_check_string_equals(cJSON_GetObjectItem(profile, "name")->valuestring, "new");
+    fst_check(cJSON_GetObjectItem(profile, "queue_depth")->valueint == 1);
+    fst_check_string_equals(cJSON_GetObjectItem(profile, "enqueued")->valuestring, "1");
+    fst_check_string_equals(cJSON_GetObjectItem(profile, "publish_ok")->valuestring, "0");
+    fst_check(cJSON_GetObjectItem(profile, "enabled")->valueint == 1);
+    cJSON_Delete(json);
+    config_snapshot = "<configuration/>";
+    fst_check(api_reply_request_command("api amqp profiels\n\n", reply, sizeof(reply)) == 0);
+    fst_check(strstr(reply, "-ERR usage:") == reply);
+    fst_check(integration_find("new") != NULL && read_counter(&unbind_calls) == 0);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(api_profiles_busy_does_not_block_status)
+{
+    char reply[4096] = {0};
+    int result;
+    switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);
+    result = api_reply_request_command("api amqp profiles\n\n", reply, sizeof(reply));
+    switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+    fst_check(result == 0);
+    fst_check_string_equals(reply, "-ERR mod_amqp profile snapshot busy\n");
+    switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);
+    result = api_reply_request_command("api amqp status\n\n", reply, sizeof(reply));
+    switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
+    fst_check(result == 0 && strstr(reply, "state=ACTIVE") != NULL);
+}
+FST_TEST_END()
+
+FST_TEST_BEGIN(api_profiles_retained_owner_and_uint64_precision)
+{
+    char reply[4096] = {0};
+    cJSON *json, *profile;
+    mod_amqp_producer_profile_t *owner;
+    fst_check(integration_reload(CONFIG_NEW) == SWITCH_STATUS_SUCCESS);
+    owner = integration_find("new");
+    switch_mutex_lock(owner->state_mutex);
+    owner->io.counters[MOD_AMQP_PUBLISH_OK] = UINT64_MAX;
+    switch_mutex_unlock(owner->state_mutex);
+    fail_unbind = 1;
+    fst_check(destroy_profile(&owner) != SWITCH_STATUS_SUCCESS);
+    fst_check(api_reply_request_command("api amqp profiles\n\n", reply, sizeof(reply)) == 0);
+    json = cJSON_Parse(strchr(reply, '\n') + 1);
+    fst_check(json != NULL);
+    profile = cJSON_GetArrayItem(cJSON_GetObjectItem(json, "producers"), 0);
+    fst_check(profile != NULL && cJSON_GetObjectItem(profile, "retained")->valueint == 1);
+    fst_check(cJSON_GetObjectItem(profile, "enabled")->valueint == 0);
+    fst_check(cJSON_GetObjectItem(profile, "join_pending")->valueint == 0);
+    fst_check_string_equals(cJSON_GetObjectItem(profile, "connection")->valuestring, "stopped");
+    fst_check_string_equals(cJSON_GetObjectItem(profile, "publish_ok")->valuestring, "18446744073709551615");
+    cJSON_Delete(json);
+}
+FST_TEST_END()

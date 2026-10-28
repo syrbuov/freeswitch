@@ -40,6 +40,14 @@
 #define MOD_AMQP_H
 
 #include <switch.h>
+
+/* APR's thread exit never returns. Core's declaration lacks this annotation;
+ * callers instrumented with ASan otherwise leave poisoned stack frames behind
+ * when an uninstrumented Core exits through pthread_exit. Keep this knowledge
+ * local to mod_amqp and its tests; do not suppress sanitizer checks. */
+#if defined(__GNUC__) || defined(__clang__)
+SWITCH_DECLARE(switch_status_t) switch_thread_exit(switch_thread_t *thd, switch_status_t retval) __attribute__((noreturn));
+#endif
 #include "mod_amqp_filter.h"
 #include <amqp.h>
 #include <amqp_framing.h>
@@ -62,11 +70,46 @@
 #define MOD_AMQP_DEBUG_TIMING 0
 #define MOD_AMQP_DEFAULT_CONTENT_TYPE "text/json"
 
+/* Wait with the same mutex that publishes stop, so shutdown cannot lose the
+ * wakeup between checking running and entering a long reconnect delay. */
+static inline void mod_amqp_worker_wait(switch_mutex_t *mutex, switch_thread_cond_t *cond,
+									  switch_bool_t *running, int milliseconds)
+{
+	switch_time_t deadline = switch_time_now() + (switch_interval_time_t)milliseconds * 1000;
+	switch_mutex_lock(mutex);
+	while (*running) {
+		switch_interval_time_t remaining = deadline - switch_time_now();
+		if (remaining <= 0) break;
+		if (switch_thread_cond_timedwait(cond, mutex, remaining) != SWITCH_STATUS_SUCCESS) break;
+	}
+	switch_mutex_unlock(mutex);
+}
+
 
 typedef struct {
-    char routing_key[MAX_AMQP_ROUTING_KEY_LENGTH];
+    char routing_key[MAX_AMQP_ROUTING_KEY_LENGTH + 1];
     char *pjson;
 } mod_amqp_message_t;
+
+/* Only the worker calls rabbitmq-c. Management may shutdown this duplicate
+ * descriptor to wake blocked I/O, without racing an AMQP object or fd reuse. */
+typedef enum {
+  MOD_AMQP_IO_DISCONNECTED, MOD_AMQP_IO_CONNECTING, MOD_AMQP_IO_READY, MOD_AMQP_IO_STOPPED
+} mod_amqp_io_state_t;
+typedef enum {
+  MOD_AMQP_CONNECT_ATTEMPTS, MOD_AMQP_CONNECT_FAILURES, MOD_AMQP_PUBLISH_OK,
+  MOD_AMQP_PUBLISH_ERRORS, MOD_AMQP_ENQUEUED, MOD_AMQP_DROPPED, MOD_AMQP_FILTERED,
+  MOD_AMQP_COUNTER_COUNT
+} mod_amqp_counter_t;
+typedef struct {
+  switch_mutex_t *mutex;
+  int fd;
+  switch_bool_t stopped;
+  switch_bool_t worker_running;
+  mod_amqp_io_state_t state;
+  const char *last_error; /* Static diagnostic code, never connection strings. */
+  uint64_t counters[MOD_AMQP_COUNTER_COUNT];
+} mod_amqp_io_t;
 
 typedef struct mod_amqp_connection_s {
   char *name;
@@ -79,6 +122,9 @@ typedef struct mod_amqp_connection_s {
   amqp_boolean_t ssl_on;
   amqp_boolean_t ssl_verify_peer;
   amqp_connection_state_t state;
+  mod_amqp_io_t *io;
+  unsigned int connect_timeout_ms;
+  unsigned int rpc_timeout_ms;
 
   struct mod_amqp_connection_s *next;
 } mod_amqp_connection_t;
@@ -148,6 +194,8 @@ typedef struct {
 
   /* Protects running and circuit_breaker_reset_time; never held across unbind, join or AMQP I/O. */
   switch_mutex_t *state_mutex;
+  switch_thread_cond_t *stop_cond;
+  mod_amqp_io_t io;
   switch_bool_t running;
   switch_memory_pool_t *pool;
   char *custom_attr;
@@ -201,6 +249,8 @@ typedef struct {
 
   /* Logging thread */
   switch_thread_t *logging_thread;
+  switch_thread_cond_t *stop_cond;
+  mod_amqp_io_t io;
   switch_queue_t *send_queue;
   unsigned int send_queue_size;
 
@@ -249,7 +299,11 @@ switch_status_t mod_amqp_connection_parse(mod_amqp_connection_t *config, switch_
 switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_xml_t cfg, switch_memory_pool_t *pool);
 void mod_amqp_connection_destroy(mod_amqp_connection_t **conn);
 void mod_amqp_connection_close(mod_amqp_connection_t *connection);
-switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod_amqp_connection_t **active, char *profile_name, char *custom_attr);
+void mod_amqp_io_stop(mod_amqp_io_t *io);
+void mod_amqp_io_state(mod_amqp_io_t *io, mod_amqp_io_state_t state, const char *error);
+void mod_amqp_io_count(mod_amqp_io_t *io, mod_amqp_counter_t counter);
+void mod_amqp_io_worker(mod_amqp_io_t *io, switch_bool_t running);
+switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod_amqp_connection_t **active, char *profile_name, char *custom_attr, mod_amqp_io_t *io);
 
 /* command */
 switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **profile);
@@ -259,7 +313,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 /* producer */
 /* create/destroy require lifecycle_mutex in the management thread, never in an event callback. */
 void mod_amqp_producer_event_handler(switch_event_t* evt);
-switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
+switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH + 1],
 					      switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[]);
 switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **profile);
 switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg);
@@ -270,12 +324,13 @@ switch_status_t mod_amqp_producer_activate(mod_amqp_producer_prepared_t *prepare
 void mod_amqp_producer_prepared_destroy(mod_amqp_producer_prepared_t **prepared);
 void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void *data);
 
-char *amqp_util_encode(char *key, char *dest);
+switch_status_t amqp_util_encode(const char *key, char *dest, size_t capacity);
 
 /* logging */
 switch_status_t mod_amqp_logging_recv(const switch_log_node_t *node, switch_log_level_t level);
 switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg);
 switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof);
+void mod_amqp_logging_stop(mod_amqp_logging_profile_t *profile);
 void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void *data);
 
 #endif /* MOD_AMQP_H */

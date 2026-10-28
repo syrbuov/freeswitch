@@ -1,3 +1,5 @@
+> Актуализация 28 октября 2026 года: producer/logging lifecycle без изменения Core и с отключёнными command-профилями описан в [новом отчёте](filter-engine-lifecycle-without-core.md). Ниже сохранены результаты предыдущего этапа.
+
 # mod_amqp Filter Engine v1 — hardening и политика permanent
 
 Дата: 27 октября 2026 года. Ветка codex/mod-amqp-filter-engine-stage3, HEAD 7d8d9e948b6761a8ec8a8672009d9051cf27cb8a. Изменения не закоммичены. На входе в продолжение уже существовали tracked diff предыдущих шагов (Makefile.am, command/logging, тесты) и неотслеживаемые IDE/build/посторонние файлы; они сохранены. Применимых AGENTS.md не найдено. Работа выполнена в исходном дереве, проверки — в отдельных процессах контейнера freeswitch-dev. Действующий сервис, его XML, RabbitMQ и установленный модуль не изменялись.

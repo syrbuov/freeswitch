@@ -60,6 +60,7 @@ test/test_producer_integration-test_producer_integration.$(OBJEXT): \
   $(srcdir)/test/worker_loop_helpers.h $(srcdir)/test/worker_loop_cases.h \
   $(srcdir)/mod_amqp.h
 EXTRA_DIST = test/conf/freeswitch.xml test/README.md test/run_filter_engine_sanitizers.sh test/api_reply_cases.h test/api_reply_helpers.h
+EXTRA_DIST += test/lifecycle_probe.c test/lifecycle_probe_interposer.c test/run_lifecycle_probes.py test/asan_thread_exit_repro.c
 
 else
 install: error

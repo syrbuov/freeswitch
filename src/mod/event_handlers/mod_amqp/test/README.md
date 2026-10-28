@@ -1,3 +1,25 @@
+Profile diagnostics and TCP recovery (2026-10-28): `amqp profiles` returns a
+JSON snapshot of workers, connection phase, queues and counters; it rejects a
+busy lifecycle without waiting. Counters reset with the profile generation;
+`publish_ok` means local publish success, not broker confirmation. See the
+[diagnostics report](../../../../../docs/mod_amqp/filter-engine-profile-diagnostics.md).
+DNS/TLS work is deferred. The loopback runner now also covers recovery from a
+rejected exchange declaration and verifies the default logging reconnect delay.
+
+Current lifecycle validation (2026-10-28): command profiles are disabled;
+producer/logging use interruptible waits and socket cancellation. Normal load
+is unloadable and participates in Core process shutdown. See
+[the current report](../../../../../docs/mod_amqp/filter-engine-lifecycle-without-core.md)
+for the supported management context and remaining Core/DNS/TLS limits.
+
+The standalone network probes do not install a module or require RabbitMQ:
+
+```sh
+python3 test/run_lifecycle_probes.py /tmp/mod-amqp-lifecycle-probes
+python3 test/run_lifecycle_probes.py /tmp/mod-amqp-lifecycle-probes-asan --sanitizer address,undefined
+python3 test/run_lifecycle_probes.py /tmp/mod-amqp-lifecycle-probes-tsan --sanitizer thread
+```
+
 # mod_amqp tests
 
 ## Producer lifecycle

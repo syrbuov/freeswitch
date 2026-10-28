@@ -38,25 +38,123 @@
 
 #include "mod_amqp.h"
 
+#ifndef WIN32
+#include <sys/socket.h>
+#include <fcntl.h>
+#endif
+
+#if AMQP_VERSION < AMQP_VERSION_CODE(0, 9, 0, 0)
+#error mod_amqp lifecycle requires rabbitmq-c 0.9.0 or newer
+#endif
+
+void mod_amqp_io_state(mod_amqp_io_t *io, mod_amqp_io_state_t state, const char *error)
+{
+	if (!io || !io->mutex) return;
+	switch_mutex_lock(io->mutex);
+	if (!io->stopped) io->state = state;
+	if (error) io->last_error = error;
+	switch_mutex_unlock(io->mutex);
+}
+
+void mod_amqp_io_count(mod_amqp_io_t *io, mod_amqp_counter_t counter)
+{
+	if (!io || !io->mutex) return;
+	switch_mutex_lock(io->mutex);
+	io->counters[counter]++;
+	switch_mutex_unlock(io->mutex);
+}
+
+void mod_amqp_io_worker(mod_amqp_io_t *io, switch_bool_t running)
+{
+	if (!io || !io->mutex) return;
+	switch_mutex_lock(io->mutex);
+	io->worker_running = running;
+	switch_mutex_unlock(io->mutex);
+}
+
+static void mod_amqp_io_release(mod_amqp_io_t *io)
+{
+	if (!io || !io->mutex) return;
+	switch_mutex_lock(io->mutex);
+	if (io->fd >= 0) {
+#ifdef WIN32
+		closesocket(io->fd);
+#else
+		close(io->fd);
+#endif
+		io->fd = -1;
+	}
+	if (!io->stopped) io->state = MOD_AMQP_IO_DISCONNECTED;
+	switch_mutex_unlock(io->mutex);
+}
+
+void mod_amqp_io_stop(mod_amqp_io_t *io)
+{
+	if (!io || !io->mutex) return;
+	switch_mutex_lock(io->mutex);
+	io->stopped = SWITCH_TRUE;
+	io->state = MOD_AMQP_IO_STOPPED;
+	if (io->fd >= 0) {
+#ifdef WIN32
+		shutdown(io->fd, SD_BOTH);
+#else
+		shutdown(io->fd, SHUT_RDWR);
+#endif
+	}
+	switch_mutex_unlock(io->mutex);
+}
+
+static switch_bool_t mod_amqp_io_stopped(mod_amqp_io_t *io)
+{
+	switch_bool_t stopped = SWITCH_FALSE;
+	if (!io) return SWITCH_FALSE;
+	switch_mutex_lock(io->mutex);
+	stopped = io->stopped;
+	switch_mutex_unlock(io->mutex);
+	return stopped;
+}
+
+static switch_status_t mod_amqp_io_register(mod_amqp_io_t *io, int fd)
+{
+	int copy;
+	if (!io) return SWITCH_STATUS_SUCCESS;
+#ifdef WIN32
+	{
+		WSAPROTOCOL_INFO info;
+		if (WSADuplicateSocket(fd, GetCurrentProcessId(), &info)) return SWITCH_STATUS_GENERR;
+		copy = (int)WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
+	}
+#else
+	copy = dup(fd);
+	if (copy >= 0 && fcntl(copy, F_SETFD, FD_CLOEXEC) < 0) {
+		close(copy);
+		copy = -1;
+	}
+#endif
+	if (copy < 0) return SWITCH_STATUS_GENERR;
+	switch_mutex_lock(io->mutex);
+	io->fd = copy;
+	if (io->stopped) {
+		switch_mutex_unlock(io->mutex);
+		mod_amqp_io_release(io);
+		return SWITCH_STATUS_GENERR;
+	}
+	switch_mutex_unlock(io->mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
 void mod_amqp_connection_close(mod_amqp_connection_t *connection)
 {
 	amqp_connection_state_t old_state = connection->state;
-	int status = 0;
-
 	connection->state = NULL;
-
-	if (old_state != NULL) {
-		mod_amqp_log_if_amqp_error(amqp_channel_close(old_state, 1, AMQP_REPLY_SUCCESS), "Closing channel");
-		mod_amqp_log_if_amqp_error(amqp_connection_close(old_state, AMQP_REPLY_SUCCESS), "Closing connection");
-
-		if ((status = amqp_destroy_connection(old_state))) {
-			const char *errstr = amqp_error_string2(-status);
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Error destroying amqp connection: %s\n", errstr);
-		}
-	}
+	/* Teardown is local: protocol close RPCs must not wait for a dead broker.
+	 * The worker owns rabbitmq-c until join; management only shuts down a dup. */
+	mod_amqp_io_release(connection->io);
+	connection->io = NULL;
+	if (old_state) amqp_destroy_connection(old_state);
 }
 
-switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod_amqp_connection_t **active, char *profile_name, char *custom_attr)
+switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod_amqp_connection_t **active, char *profile_name, char *custom_attr, mod_amqp_io_t *io)
 {
 	int channel_max = 0;
 	int frame_max = 131072;
@@ -64,88 +162,93 @@ switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod
 	amqp_table_entry_t loginTableEntries[5];
 	char hostname[64];
 	int bHasHostname;
-	char key_string[256] = {0};
+	char key_string[5][256] = {{0}};
+	const char *attribute = custom_attr ? custom_attr : "";
+	const char *phase = "connect";
 	amqp_rpc_reply_t status;
 	amqp_socket_t *socket = NULL;
 	int amqp_status = -1;
 	mod_amqp_connection_t *connection_attempt = NULL;
-	amqp_connection_state_t newConnection = amqp_new_connection();
-	amqp_connection_state_t oldConnection = NULL;
+	amqp_connection_state_t newConnection = NULL;
+	struct timeval connect_timeout, rpc_timeout;
 
 	if (active && *active) {
-		oldConnection = (*active)->state;
+		mod_amqp_connection_close(*active);
+		*active = NULL;
 	}
 
 	/* Set up meta data for connection */
 	bHasHostname = gethostname(hostname, sizeof(hostname)) == 0;
+	hostname[sizeof(hostname) - 1] = '\0';
 
 	loginProperties.num_entries = sizeof(loginTableEntries)/sizeof(*loginTableEntries);
 	loginProperties.entries = loginTableEntries;
 
-	snprintf(key_string, 256, "x_%s_HostMachineName", custom_attr);
-	loginTableEntries[0].key = amqp_cstring_bytes(key_string);
+	snprintf(key_string[0], sizeof(key_string[0]), "x_%s_HostMachineName", attribute);
+	loginTableEntries[0].key = amqp_cstring_bytes(key_string[0]);
 	loginTableEntries[0].value.kind = AMQP_FIELD_KIND_BYTES;
 	loginTableEntries[0].value.value.bytes = amqp_cstring_bytes(bHasHostname ? hostname : "(unknown)");
 
-	snprintf(key_string, 256, "x_%s_ProcessDescription", custom_attr);
-	loginTableEntries[1].key = amqp_cstring_bytes(key_string);
+	snprintf(key_string[1], sizeof(key_string[1]), "x_%s_ProcessDescription", attribute);
+	loginTableEntries[1].key = amqp_cstring_bytes(key_string[1]);
 	loginTableEntries[1].value.kind = AMQP_FIELD_KIND_BYTES;
 	loginTableEntries[1].value.value.bytes = amqp_cstring_bytes("FreeSwitch");
 
-	snprintf(key_string, 256, "x_%s_ProcessType", custom_attr);
-	loginTableEntries[2].key = amqp_cstring_bytes(key_string);
+	snprintf(key_string[2], sizeof(key_string[2]), "x_%s_ProcessType", attribute);
+	loginTableEntries[2].key = amqp_cstring_bytes(key_string[2]);
 	loginTableEntries[2].value.kind = AMQP_FIELD_KIND_BYTES;
 	loginTableEntries[2].value.value.bytes = amqp_cstring_bytes("TAP");
 
-	snprintf(key_string, 256, "x_%s_ProcessBuildVersion", custom_attr);
-	loginTableEntries[3].key = amqp_cstring_bytes(key_string);
+	snprintf(key_string[3], sizeof(key_string[3]), "x_%s_ProcessBuildVersion", attribute);
+	loginTableEntries[3].key = amqp_cstring_bytes(key_string[3]);
 	loginTableEntries[3].value.kind = AMQP_FIELD_KIND_BYTES;
 	loginTableEntries[3].value.value.bytes = amqp_cstring_bytes(switch_version_full());
 
-	snprintf(key_string, 256, "x_%s_Liquid_ProcessBuildBornOn", custom_attr);
-	loginTableEntries[4].key = amqp_cstring_bytes(key_string);
+	snprintf(key_string[4], sizeof(key_string[4]), "x_%s_Liquid_ProcessBuildBornOn", attribute);
+	loginTableEntries[4].key = amqp_cstring_bytes(key_string[4]);
 	loginTableEntries[4].value.kind = AMQP_FIELD_KIND_BYTES;
 	loginTableEntries[4].value.value.bytes = amqp_cstring_bytes(__DATE__ " " __TIME__);
 
-	if (!(socket = amqp_tcp_socket_new(newConnection))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Could not create TCP socket\n");
-		goto err;
-	}
-
-	connection_attempt = connections;
-	amqp_status = -1;
-
-	while (connection_attempt && amqp_status){
-		if (connection_attempt->ssl_on == 1) {
-			amqp_set_initialize_ssl_library(connection_attempt->ssl_on);
-			if (!(socket = amqp_ssl_socket_new(newConnection))) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Could not create SSL socket\n");
-				goto err;
-			}
-			amqp_ssl_socket_set_verify_peer(socket, connection_attempt->ssl_verify_peer);
+	if (active) *active = NULL;
+	for (connection_attempt = connections; connection_attempt; connection_attempt = connection_attempt->next) {
+		if (mod_amqp_io_stopped(io)) goto err;
+		mod_amqp_io_state(io, MOD_AMQP_IO_CONNECTING, NULL);
+		mod_amqp_io_count(io, MOD_AMQP_CONNECT_ATTEMPTS);
+		newConnection = amqp_new_connection();
+		if (!newConnection) goto err;
+		connect_timeout.tv_sec = connection_attempt->connect_timeout_ms / 1000;
+		connect_timeout.tv_usec = (connection_attempt->connect_timeout_ms % 1000) * 1000;
+		rpc_timeout.tv_sec = connection_attempt->rpc_timeout_ms / 1000;
+		rpc_timeout.tv_usec = (connection_attempt->rpc_timeout_ms % 1000) * 1000;
+		if (amqp_set_handshake_timeout(newConnection, &connect_timeout) != AMQP_STATUS_OK ||
+			amqp_set_rpc_timeout(newConnection, &rpc_timeout) != AMQP_STATUS_OK) goto err;
+		if (connection_attempt->ssl_on) {
+			socket = amqp_ssl_socket_new(newConnection);
+			if (socket) amqp_ssl_socket_set_verify_peer(socket, connection_attempt->ssl_verify_peer);
+		} else {
+			socket = amqp_tcp_socket_new(newConnection);
 		}
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Profile[%s] trying to connect to AMQP broker %s:%d\n",
-						  profile_name, connection_attempt->hostname, connection_attempt->port);
-
-		if ((amqp_status = amqp_socket_open(socket, connection_attempt->hostname, connection_attempt->port))){
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not open socket connection to AMQP broker %s:%d status(%d) %s\n",
-							  connection_attempt->hostname, connection_attempt->port,	amqp_status, amqp_error_string2(amqp_status));
-			connection_attempt = connection_attempt->next;
-		}
+		if (!socket) goto err;
+		amqp_status = amqp_socket_open_noblock(socket, connection_attempt->hostname, connection_attempt->port, &connect_timeout);
+		if (amqp_status == AMQP_STATUS_OK) break;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Profile[%s] socket connection failed: %s\n", profile_name, amqp_error_string2(amqp_status));
+		mod_amqp_io_count(io, MOD_AMQP_CONNECT_FAILURES);
+		mod_amqp_io_state(io, MOD_AMQP_IO_DISCONNECTED, "socket_open");
+		amqp_destroy_connection(newConnection);
+		newConnection = NULL;
 	}
-
-	if (active) {
-		*active = connection_attempt;
-	}
-
 	if (!connection_attempt) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] could not connect to any AMQP brokers\n", profile_name);
+		phase = NULL; /* Each failed target was already counted. */
 		goto err;
 	}
+	if (mod_amqp_io_stopped(io)) goto err;
+	if (mod_amqp_io_register(io, amqp_get_sockfd(newConnection)) != SWITCH_STATUS_SUCCESS) goto err;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Profile[%s] opened socket connection to AMQP broker %s:%d\n",
 					  profile_name, connection_attempt->hostname, connection_attempt->port);
 
+	phase = "login";
 	/* We have a connection, now log in */
 	status = amqp_login_with_properties(newConnection,
 										connection_attempt->virtualhost,
@@ -157,35 +260,23 @@ switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod
 										connection_attempt->username,
 										connection_attempt->password);
 
-	if (mod_amqp_log_if_amqp_error(status, "Logging in")) {
-		if (active) {
-			mod_amqp_connection_close(*active);
-			*active = NULL;
-		}
-		goto err;
-	}
-
-	// Open a channel (1). This is fairly standard
+	if (mod_amqp_log_if_amqp_error(status, "Logging in")) goto err;
+	if (mod_amqp_io_stopped(io)) goto err;
+	phase = "channel_open";
 	amqp_channel_open(newConnection, 1);
-	if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(newConnection), "Opening channel")) {
-		if (active) {
-			mod_amqp_connection_close(*active);
-			*active = NULL;
-		}
-		goto err;
-	}
-
-	if (active) {
-		(*active)->state = newConnection;
-	}
-
-	if (oldConnection) {
-		amqp_destroy_connection(oldConnection);
-	}
+	if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(newConnection), "Opening channel")) goto err;
+	connection_attempt->state = newConnection;
+	connection_attempt->io = io;
+	if (active) *active = connection_attempt;
 
 	return SWITCH_STATUS_SUCCESS;
 
 err:
+	if (phase && !mod_amqp_io_stopped(io)) {
+		mod_amqp_io_count(io, MOD_AMQP_CONNECT_FAILURES);
+		mod_amqp_io_state(io, MOD_AMQP_IO_DISCONNECTED, phase);
+	}
+	mod_amqp_io_release(io);
     if (newConnection) {
         amqp_destroy_connection(newConnection);
     }
@@ -202,16 +293,17 @@ switch_status_t mod_amqp_connection_parse(mod_amqp_connection_t *new_con, switch
 	amqp_boolean_t ssl_verify_peer = 1;
 
 	if (zstr(name)) {
-		char *str_tmp = switch_xml_toxml(cfg, 1);
-
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Connection missing name attribute\n%s\n", str_tmp);
-		switch_safe_free(str_tmp);
+		/* A connection XML dump may contain credentials. */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Connection missing name attribute\n");
 
 		return SWITCH_STATUS_GENERR;
 	}
 
 	new_con->name = switch_core_strdup(pool, name);
 	new_con->state = NULL;
+	new_con->io = NULL;
+	new_con->connect_timeout_ms = 3000;
+	new_con->rpc_timeout_ms = 3000;
 	new_con->next = NULL;
 
 	for (param = switch_xml_child(cfg, "param"); param; param = param->next) {
@@ -228,7 +320,16 @@ switch_status_t mod_amqp_connection_parse(mod_amqp_connection_t *new_con, switch
 			continue;
 		}
 
-		if (!strncmp(var, "hostname", 8)) {
+		if (!strcmp(var, "connect-timeout-ms") || !strcmp(var, "rpc-timeout-ms")) {
+			char *end = NULL;
+			long timeout = strtol(val, &end, 10);
+			if (end == val || *end || timeout < 1 || timeout > 60000) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Invalid AMQP connection timeout (expected 1..60000 ms)\n");
+				return SWITCH_STATUS_GENERR;
+			}
+			if (!strcmp(var, "connect-timeout-ms")) new_con->connect_timeout_ms = (unsigned int)timeout;
+			else new_con->rpc_timeout_ms = (unsigned int)timeout;
+		} else if (!strncmp(var, "hostname", 8)) {
 			hostname = switch_core_strdup(pool, val);
 		} else if (!strncmp(var, "virtualhost", 11)) {
 			virtualhost = switch_core_strdup(pool, val);

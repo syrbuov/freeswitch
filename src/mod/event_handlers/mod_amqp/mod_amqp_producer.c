@@ -54,34 +54,39 @@ static switch_bool_t mod_amqp_producer_is_running(mod_amqp_producer_profile_t *p
 	return running;
 }
 
-switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
-											  switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[])
+switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profile, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH + 1],
+											  switch_event_t *evt, mod_amqp_keypart_t routingKeyEventHeaderNames[])
 {
-	int i = 0, idx = 0, x = 0;
-	char keybuffer[MAX_AMQP_ROUTING_KEY_LENGTH];
-
-	for (i = 0; i < MAX_ROUTING_KEY_FORMAT_FIELDS && idx < MAX_AMQP_ROUTING_KEY_LENGTH; i++) {
-		if (routingKeyEventHeaderNames[i].size) {
-			if (idx) {
-				routingKey[idx++] = '.';
+	int i, x;
+	size_t used = 0;
+	(void)profile;
+	routingKey[0] = '\0';
+	for (i = 0; i < MAX_ROUTING_KEY_FORMAT_FIELDS; i++) {
+		if (!routingKeyEventHeaderNames[i].size) continue;
+		if (used) {
+			if (used == MAX_AMQP_ROUTING_KEY_LENGTH) goto too_long;
+			routingKey[used++] = '.';
+			routingKey[used] = '\0';
+		}
+		for (x = 0; x < routingKeyEventHeaderNames[i].size; x++) {
+			const char *field = routingKeyEventHeaderNames[i].name[x];
+			const char *value = field[0] == '#' ? field + 1 : switch_event_get_header(evt, field);
+			if (!value) continue;
+			if (field[0] == '#') {
+				size_t length = strlen(value);
+				if (length > MAX_AMQP_ROUTING_KEY_LENGTH - used) goto too_long;
+				memcpy(routingKey + used, value, length + 1);
+			} else if (amqp_util_encode(value, routingKey + used, MAX_AMQP_ROUTING_KEY_LENGTH + 1 - used) != SWITCH_STATUS_SUCCESS) {
+				goto too_long;
 			}
-			for( x = 0; x < routingKeyEventHeaderNames[i].size; x++) {
-				if (routingKeyEventHeaderNames[i].name[x][0] == '#') {
-					strncpy(routingKey + idx, routingKeyEventHeaderNames[i].name[x] + 1, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
-					break;
-				} else {
-					char *value = switch_event_get_header(evt, routingKeyEventHeaderNames[i].name[x]);
-					if (value) {
-						amqp_util_encode(value, keybuffer);
-						strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
-						break;
-					}
-				}
-			}
-			idx += strlen(routingKey + idx);
+			used += strlen(routingKey + used);
+			break;
 		}
 	}
 	return SWITCH_STATUS_SUCCESS;
+ too_long:
+	routingKey[0] = '\0';
+	return SWITCH_STATUS_GENERR;
 }
 
 void mod_amqp_producer_event_handler(switch_event_t* evt)
@@ -107,16 +112,30 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 	reset_time = profile->circuit_breaker_reset_time;
 	switch_mutex_unlock(profile->state_mutex);
 	if (now < reset_time) {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] circuit breaker hit[%d] (%d)\n", profile->name, (int) now, (int) reset_time);
 		return;
 	}
 
-	if (profile->filter_mode == MOD_AMQP_FILTER_RULES && !mod_amqp_filter_match(profile->filter_engine, evt)) return;
+	if (profile->filter_mode == MOD_AMQP_FILTER_RULES && !mod_amqp_filter_match(profile->filter_engine, evt)) {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_FILTERED);
+		return;
+	}
 
 	switch_malloc(amqp_message, sizeof(mod_amqp_message_t));
 
-	switch_event_serialize_json(evt, &amqp_message->pjson);
-	mod_amqp_producer_routing_key(profile, amqp_message->routing_key, evt, profile->format_fields);
+	amqp_message->pjson = NULL;
+	if (mod_amqp_producer_routing_key(profile, amqp_message->routing_key, evt, profile->format_fields) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] routing key exceeds 255 bytes; event dropped\n", profile->name);
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
+		mod_amqp_util_msg_destroy(&amqp_message);
+		return;
+	}
+	if (switch_event_serialize_json(evt, &amqp_message->pjson) != SWITCH_STATUS_SUCCESS || !amqp_message->pjson) {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
+		mod_amqp_util_msg_destroy(&amqp_message);
+		return;
+	}
 
 	/* Queue the message to be sent by the worker thread, errors are reported only once per circuit breaker interval */
 	if (switch_queue_trypush(profile->send_queue, amqp_message) != SWITCH_STATUS_SUCCESS) {
@@ -130,7 +149,10 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP message queue full. Messages will be dropped for %.1fs! (Queue capacity %d)",
 						  profile->circuit_breaker_ms / 1000.0, queue_size);
 
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
 		mod_amqp_util_msg_destroy(&amqp_message);
+	} else {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_ENQUEUED);
 	}
 }
 
@@ -168,8 +190,11 @@ switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **prof) {
 	if (profile->state_mutex) {
 		switch_mutex_lock(profile->state_mutex);
 		profile->running = SWITCH_FALSE;
+		if (profile->stop_cond) switch_thread_cond_broadcast(profile->stop_cond);
 		switch_mutex_unlock(profile->state_mutex);
 	}
+	if (profile->send_queue) switch_queue_interrupt_all(profile->send_queue);
+	mod_amqp_io_stop(&profile->io);
 
 	if (profile->producer_thread) {
 		if (switch_thread_join(&status, profile->producer_thread) != SWITCH_STATUS_SUCCESS) {
@@ -199,6 +224,7 @@ switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **prof) {
 	profile->conn_root = NULL;
 
 	while (profile->send_queue && switch_queue_trypop(profile->send_queue, (void**)&msg) == SWITCH_STATUS_SUCCESS) {
+		mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
 		mod_amqp_util_msg_destroy(&msg);
 	}
 
@@ -475,6 +501,12 @@ switch_status_t mod_amqp_producer_activate(mod_amqp_producer_prepared_t *prepare
 	if (switch_core_hash_find(mod_amqp_globals.producer_hash, name)) goto err;
 	if (switch_mutex_init(&state_mutex, SWITCH_MUTEX_NESTED, profile->pool) != SWITCH_STATUS_SUCCESS) goto err;
 	profile->state_mutex = state_mutex;
+	profile->io.mutex = state_mutex;
+	profile->io.fd = -1;
+	if (switch_thread_cond_create(&profile->stop_cond, profile->pool) != SWITCH_STATUS_SUCCESS) {
+		profile->stop_cond = NULL;
+		goto err;
+	}
 	profile->running = SWITCH_TRUE; /* No readers until sender/bind publication. */
 	tail = &profile->conn_root;
 	for (config = prepared->connection_configs; config; config = config->next) {
@@ -599,16 +631,19 @@ switch_status_t mod_amqp_producer_send(mod_amqp_producer_profile_t *profile, mod
 								amqp_cstring_bytes(msg->pjson));
 
 	if (status < 0) {
-		const char *errstr = amqp_error_string2(-status);
+		const char *errstr = amqp_error_string2(status);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] failed to send event on connection[%s]: %s\n",
 						  profile->name, profile->conn_active->name, errstr);
 
+		mod_amqp_io_count(&profile->io, MOD_AMQP_PUBLISH_ERRORS);
+		mod_amqp_io_state(&profile->io, MOD_AMQP_IO_DISCONNECTED, "publish");
 		/* This is bad, we couldn't send the message. Clear up any connection */
 		mod_amqp_connection_close(profile->conn_active);
 		profile->conn_active = NULL;
 		return SWITCH_STATUS_SOCKERR;
 	}
 
+	mod_amqp_io_count(&profile->io, MOD_AMQP_PUBLISH_OK);
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -620,12 +655,13 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 	amqp_boolean_t passive = 0;
 	amqp_boolean_t durable = 1;
 
+	mod_amqp_io_worker(&profile->io, SWITCH_TRUE);
 	while (mod_amqp_producer_is_running(profile)) {
 
 		if (!profile->conn_active) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");
 
-			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr);
+			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr, &profile->io);
 			if ( status	== SWITCH_STATUS_SUCCESS ) {
 				// Ensure that the exchange exists, and is of the correct type
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
@@ -646,14 +682,20 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 									  amqp_empty_table);
 #endif
 				if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring exchange")) {
+					mod_amqp_io_state(&profile->io, MOD_AMQP_IO_READY, NULL);
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
 					continue;
 				}
+				mod_amqp_io_count(&profile->io, MOD_AMQP_CONNECT_FAILURES);
+				mod_amqp_io_state(&profile->io, MOD_AMQP_IO_DISCONNECTED, "exchange_declare");
+				mod_amqp_connection_close(profile->conn_active);
+				profile->conn_active = NULL;
+				status = SWITCH_STATUS_GENERR;
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to connect with code(%d), sleeping for %dms\n",
 							  profile->name, status, profile->reconnect_interval_ms);
-			switch_sleep(profile->reconnect_interval_ms * 1000);
+			mod_amqp_worker_wait(profile->state_mutex, profile->stop_cond, &profile->running, profile->reconnect_interval_ms);
 			continue;
 		}
 
@@ -661,8 +703,8 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 			continue;
 		}
 
-		if (msg) {
-#ifdef MOD_AMQP_DEBUG_TIMING
+		if (msg && mod_amqp_producer_is_running(profile)) {
+#if MOD_AMQP_DEBUG_TIMING
 			long times[TIME_STATS_TO_AGGREGATE];
 			static unsigned int thistime = 0;
 			switch_time_t start = switch_time_now();
@@ -679,6 +721,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 
 			case SWITCH_STATUS_SOCKERR:
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'socket error'\n");
+				mod_amqp_worker_wait(profile->state_mutex, profile->stop_cond, &profile->running, profile->reconnect_interval_ms);
 				break;
 
 			default:
@@ -689,7 +732,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 				break;
 			}
 
-#ifdef MOD_AMQP_DEBUG_TIMING
+#if MOD_AMQP_DEBUG_TIMING
 			times[thistime++] = switch_time_now() - start;
 			if (thistime >= TIME_STATS_TO_AGGREGATE) {
 				int i;
@@ -714,7 +757,9 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 	}
 
 	/* Abort the current message */
+	if (msg) mod_amqp_io_count(&profile->io, MOD_AMQP_DROPPED);
 	mod_amqp_util_msg_destroy(&msg);
+	mod_amqp_io_worker(&profile->io, SWITCH_FALSE);
 
 	// Terminate the thread
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Event sender thread stopped\n");

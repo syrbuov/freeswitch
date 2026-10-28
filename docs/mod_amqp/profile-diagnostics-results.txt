@@ -1,0 +1,118 @@
+mod_amqp profile diagnostics / TCP recovery acceptance, 2026-10-28
+Core unchanged; command profiles disabled; DNS/TLS deferred by user.
+No installation, production restart, or push performed.
+
+Final -Wall -Werror build and make check: exit 0
+test_filter_engine: PASSED (19/19 tests in 0.099450s)
+test_producer_lifecycle: PASSED (18/18 tests in 0.013578s)
+test_producer_integration: PASSED (45/45 tests in 0.272937s)
+
+Integration sanitizer runs:
+address,undefined: PASSED (45/45 tests in 0.764924s)
+thread: PASSED (45/45 tests in 2.232635s)
+
+Real production DSO + loopback TCP AMQP stub:
+
+normal (10/10 scenarios passed):
+blocked-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=21
+declare-recovery:
+  profiles: state=ready recovery=1 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=12
+load-unload-cycle:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=7
+process-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2636
+process-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=2542
+process-queue:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=3226
+process-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2722
+reload-unload-race:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1516
+unload-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=3
+unload-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+
+asan (10/10 scenarios passed):
+blocked-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=5
+declare-recovery:
+  profiles: state=ready recovery=1 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=1
+load-unload-cycle:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2
+process-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2616
+process-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=3347
+process-queue:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2712
+process-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2709
+reload-unload-race:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1503
+unload-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=1
+unload-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2
+
+tsan (10/10 scenarios passed):
+blocked-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=33
+declare-recovery:
+  profiles: state=ready recovery=1 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=4
+load-unload-cycle:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=7
+process-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=3177
+process-publish:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=3393
+process-queue:
+  profiles: state=ready recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2599
+process-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2942
+reload-unload-race:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1509
+unload-handshake:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=17
+unload-rpc:
+  profiles: state=connecting recovery=0 workers_running=2
+  mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2
+
+Final diagnostic-only correction after full sanitizer/probe runs:
+amqp_error_string2(-9) = a socket error occurred
+amqp_error_string2(9) = (unknown error)
+Build/regression repeated after this correction: 19/19, 18/18, 45/45.
+
+Sanitizers instrument module/harness/interposer, not installed Core/APR/rabbitmq-c.
+These probes do not replace real RabbitMQ/application/stress/canary acceptance.

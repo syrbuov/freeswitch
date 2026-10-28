@@ -63,9 +63,14 @@ FST_TEST_BEGIN(command_and_logging_stop_during_reconnect_wait)
 		fst_check(worker_state_mutex_available(&context));
 		fst_check(switch_threadattr_create(&attr, fst_pool) == SWITCH_STATUS_SUCCESS);
 		fst_check(switch_thread_create(&destroyer, attr, worker_destroy_thread, &context, fst_pool) == SWITCH_STATUS_SUCCESS);
-		fst_check(worker_stop_seen(&context));
-		fst_check(read_counter(&destroy_done) == 0);
+		/* Logging uses a real condition wait: stop must wake it without the
+		 * synthetic release required by the old command sleep wrapper. */
+		if (command) {
+			fst_check(worker_stop_seen(&context));
+			fst_check(read_counter(&destroy_done) == 0);
+		}
 		set_counter(&worker_release_sleep, 1);
+		fst_check(await_counter(&destroy_done, 1));
 		fst_check(switch_thread_join(&joined, destroyer) == SWITCH_STATUS_SUCCESS);
 		fst_check(context.status == SWITCH_STATUS_SUCCESS && context.profile == NULL);
 		worker_mode = WORKER_IDLE;

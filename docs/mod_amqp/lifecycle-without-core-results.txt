@@ -1,0 +1,40 @@
+Baseline: aa7df4d6ca; date: 2026-10-28; Linux GCC 12.2, rabbitmq-c 0.11.0
+make -Werror mod_amqp.la check: PASS
+test_producer_integration.log ['PASSED (42/42 tests in 0.394415s)']
+test_filter_engine.log ['PASSED (19/19 tests in 0.264199s)']
+test_producer_lifecycle.log ['PASSED (18/18 tests in 0.036663s)']
+test_producer_integration_thread.log ['PASSED (42/42 tests in 1.809414s)']
+test_producer_integration_address,undefined.log ['PASSED (42/42 tests in 0.771602s)']
+
+normal
+blocked-publish: mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=29
+load-unload-cycle: mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+process-handshake: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2774
+process-publish: mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=2675
+process-queue: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2786
+process-rpc: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2788
+reload-unload-race: mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1504
+unload-handshake: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=8
+unload-rpc: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+
+asan
+blocked-publish: mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=3
+load-unload-cycle: mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=1
+process-handshake: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2745
+process-publish: mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=3289
+process-queue: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2691
+process-rpc: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2721
+reload-unload-race: mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1504
+unload-handshake: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=1
+unload-rpc: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=1
+
+tsan
+blocked-publish: mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=19
+load-unload-cycle: mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=3
+process-handshake: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2661
+process-publish: mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=2856
+process-queue: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2683
+process-rpc: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2376
+reload-unload-race: mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1509
+unload-handshake: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=5
+unload-rpc: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=9

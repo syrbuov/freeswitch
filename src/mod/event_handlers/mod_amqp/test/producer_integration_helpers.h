@@ -1,4 +1,15 @@
 /* Included only by the integration test translation unit. */
+static int shutdown_entered, shutdown_done;
+
+static void *SWITCH_THREAD_FUNC integration_shutdown_thread(switch_thread_t *thread, void *data)
+{
+	switch_status_t *status = data;
+	set_counter(&shutdown_entered, 1);
+	*status = mod_amqp_shutdown();
+	set_counter(&shutdown_done, 1);
+	switch_thread_exit(thread, SWITCH_STATUS_SUCCESS);
+	return NULL;
+}
 
 static void integration_reset(void)
 {
@@ -11,6 +22,7 @@ static void integration_reset(void)
 	worker_mode = WORKER_IDLE;
 	worker_io_entered = worker_sleep_entered = worker_queue_entered = 0;
 	worker_release_io = worker_release_sleep = worker_release_queue = 0;
+	shutdown_entered = shutdown_done = 0;
 }
 
 static void integration_dispatch(switch_event_t *event)

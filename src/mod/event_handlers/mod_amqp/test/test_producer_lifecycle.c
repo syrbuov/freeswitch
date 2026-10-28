@@ -36,8 +36,9 @@ enum worker_test_mode { WORKER_IDLE, WORKER_IO_BLOCK, WORKER_SLEEP_BLOCK, WORKER
 static enum worker_test_mode worker_mode;
 static int worker_io_entered, worker_sleep_entered, worker_queue_entered;
 static int worker_release_io, worker_release_sleep, worker_release_queue;
-static switch_status_t integration_connection_open(mod_amqp_connection_t *, mod_amqp_connection_t **, char *, char *);
+static switch_status_t integration_connection_open(mod_amqp_connection_t *, mod_amqp_connection_t **, char *, char *, mod_amqp_io_t *);
 static void integration_worker_sleep(switch_interval_time_t);
+static void integration_worker_wait(switch_mutex_t *, switch_thread_cond_t *, switch_bool_t *, int);
 static switch_status_t integration_queue_pop_timeout(switch_queue_t *, void **, switch_interval_time_t);
 static switch_status_t integration_adjacent_mutex_init(switch_mutex_t **, unsigned int, switch_memory_pool_t *);
 
@@ -89,11 +90,13 @@ static switch_status_t integration_other_thread(switch_thread_t **, switch_threa
 #define switch_mutex_init integration_adjacent_mutex_init
 #define mod_amqp_connection_open integration_connection_open
 #define switch_sleep integration_worker_sleep
+#define mod_amqp_worker_wait integration_worker_wait
 #define switch_queue_pop_timeout integration_queue_pop_timeout
 #include "../mod_amqp_logging.c"
 #include "../mod_amqp_command.c"
 #undef switch_queue_pop_timeout
 #undef switch_sleep
+#undef mod_amqp_worker_wait
 #undef mod_amqp_connection_open
 #undef switch_mutex_init
 #undef switch_thread_join

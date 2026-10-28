@@ -1,3 +1,5 @@
+> Актуализация 28 октября 2026 года: producer/logging lifecycle без изменения Core и с отключёнными command-профилями описан в [новом отчёте](filter-engine-lifecycle-without-core.md). Ниже сохранены результаты предыдущего этапа.
+
 # Дополнение: проверка штатного load/unload, 27 октября 2026 года
 
 **Вердикт: BLOCKED; штатный load/unload в production-код не внесён.**

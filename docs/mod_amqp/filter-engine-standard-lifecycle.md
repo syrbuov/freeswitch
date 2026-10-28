@@ -1,3 +1,5 @@
+> Актуализация 28 октября 2026 года: producer/logging lifecycle без изменения Core и с отключёнными command-профилями описан в [новом отчёте](filter-engine-lifecycle-without-core.md). Ниже сохранены результаты предыдущего этапа.
+
 # mod_amqp Filter Engine v1 — проверка штатного lifecycle
 
 Дата: 27 октября 2026 года. Ветка codex/mod-amqp-filter-engine-stage3, HEAD
