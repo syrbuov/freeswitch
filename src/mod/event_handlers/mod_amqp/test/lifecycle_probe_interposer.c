@@ -121,3 +121,29 @@ int amqp_basic_publish(amqp_connection_state_t state, amqp_channel_t channel, am
     pthread_mutex_lock(&lock); in_publish--; pthread_mutex_unlock(&lock);
     return result;
 }
+
+/* Observe the unchanged legacy console executor while forwarding to real Core.
+ * Synthetic commands use no live channel or reachable originate endpoint. */
+static int command_calls, command_completed, command_errors;
+void amqp_probe_command_counts(int *calls, int *completed, int *errors)
+{
+    pthread_mutex_lock(&lock);
+    *calls=command_calls; *completed=command_completed; *errors=command_errors;
+    pthread_mutex_unlock(&lock);
+}
+SWITCH_DECLARE(switch_status_t) switch_console_execute(char *cmd, int rec, switch_stream_handle_t *stream)
+{
+    switch_status_t (*next)(char *, int, switch_stream_handle_t *);
+    switch_status_t result;
+    int exists=!strcmp(cmd,"uuid_exists mod-amqp-local-test-missing-channel");
+    int originate=!strcmp(cmd,"bgapi originate error/mod-amqp-local-test &park()");
+    get_symbol(&next,sizeof(next),"switch_console_execute");
+    if(exists || originate) { pthread_mutex_lock(&lock); command_calls++; pthread_mutex_unlock(&lock); }
+    result=next(cmd,rec,stream);
+    if(exists || originate) {
+        int ok=result==SWITCH_STATUS_SUCCESS && stream->data &&
+            (exists?!strcmp(stream->data,"false"):!strncmp(stream->data,"+OK Job-UUID: ",14));
+        pthread_mutex_lock(&lock); command_completed++; if(!ok) command_errors++; pthread_mutex_unlock(&lock);
+    }
+    return result;
+}

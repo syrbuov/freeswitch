@@ -232,10 +232,11 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 	status = SWITCH_STATUS_SUCCESS;
 	profiles = switch_xml_child(cfg, "commands");
 	for (profile = profiles ? switch_xml_child(profiles, "profile") : NULL; profile; profile = profile->next) {
-		/* Arbitrary console execution can unload this DSO or stop Core on the
-		 * command worker itself. Disabled until a safe command ingress exists. */
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"AMQP command profile ignored: command execution is disabled\n");
+		/* Legacy executor restored for the trusted local test application.
+		 * Production configurations must omit command profiles. */
+		const char *name = switch_xml_attr_soft(profile, "name");
+		if (zstr(name) || switch_core_hash_find(mod_amqp_globals.command_hash, name) ||
+			mod_amqp_command_create((char *)name, profile) != SWITCH_STATUS_SUCCESS) status = SWITCH_STATUS_GENERR;
 	}
 	profiles = switch_xml_child(cfg, "logging");
 	for (profile = profiles ? switch_xml_child(profiles, "profile") : NULL; profile; profile = profile->next) {

@@ -10,6 +10,7 @@
 
 static void (*counts)(int *,int *,int *,int *,int *);
 static void (*send_counts)(int *,int *);
+static void (*command_counts)(int *,int *,int *);
 static void (*arm)(void), (*release_gate)(void);
 static int (*gate_entered)(void);
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
@@ -28,7 +29,7 @@ static int status_api(void)
     int ok;
     SWITCH_STANDARD_STREAM(stream);
     ok=switch_api_execute("amqp","status",NULL,&stream)==SWITCH_STATUS_SUCCESS && stream.data &&
-        strstr(stream.data,"state=ACTIVE") && strstr(stream.data,"commands=disabled");
+        strstr(stream.data,"state=ACTIVE") && strstr(stream.data,"commands=legacy-local-test");
     switch_safe_free(stream.data);
     return ok;
 }
@@ -44,6 +45,14 @@ static int profile_metrics(const char *expected, int recovery)
        !stream.data || strncmp(stream.data,"+OK mod_amqp profiles\n",22)) goto done;
     body=strchr(stream.data,'\n');
     if(!body || !(root=cJSON_Parse(body+1))) goto done;
+    if(getenv("AMQP_PROBE_LEGACY_COMMAND")) {
+        int calls,completed,errors;
+        item=cJSON_GetObjectItem(root,"commands");
+        if(!item || !item->valuestring || strcmp(item->valuestring,"legacy-local-test")) goto done;
+        command_counts(&calls,&completed,&errors);
+        ok=calls==2 && completed==2 && errors==0;
+        goto done;
+    }
     for(i=0;i<2;i++) {
         array=cJSON_GetObjectItem(root,groups[i]);
         if(cJSON_GetArraySize(array)!=1) goto done;
@@ -120,6 +129,22 @@ int main(int argc,char **argv)
     symbol(&arm,sizeof(arm),"amqp_probe_arm");
     symbol(&release_gate,sizeof(release_gate),"amqp_probe_release");
     symbol(&gate_entered,sizeof(gate_entered),"amqp_probe_entered");
+    symbol(&command_counts,sizeof(command_counts),"amqp_probe_command_counts");
+    if(getenv("AMQP_PROBE_LEGACY_COMMAND") &&
+       switch_loadable_module_load_module("/usr/local/freeswitch/mod","mod_commands",SWITCH_FALSE,&error)!=SWITCH_STATUS_SUCCESS) return 26;
+    if(!strcmp(mode,"core-bgapi")) {
+        switch_stream_handle_t stream={0};
+        SWITCH_STANDARD_STREAM(stream);
+        if(switch_console_execute("bgapi originate error/mod-amqp-local-test &park()",0,&stream)!=SWITCH_STATUS_SUCCESS) return 27;
+        switch_safe_free(stream.data);
+        /* Reproduce the background-job/Core teardown report without loading
+         * mod_amqp. A delay is not a detached-thread completion barrier. */
+        switch_sleep(500000);
+        fprintf(stderr,"probe: Core-only bgapi; mod_amqp never loaded\n");
+        result=switch_core_destroy();
+        printf("mode=core-bgapi result=%d\n",(int)result);
+        return result==SWITCH_STATUS_SUCCESS?0:28;
+    }
     if(switch_loadable_module_load_module(module,"mod_amqp",SWITCH_FALSE,&error)!=SWITCH_STATUS_SUCCESS || !status_api()) return 11;
     fprintf(stderr,"probe: module active; waiting for broker stage\n");
     if(getenv("AMQP_PROBE_READY") && !await_ready(getenv("AMQP_PROBE_READY"))) return 12;
@@ -129,7 +154,11 @@ int main(int argc,char **argv)
         switch_time_t deadline=switch_time_now()+3000000;
         while(!profile_metrics(expected?expected:"ready",recovery) && switch_time_now()<deadline) switch_sleep(1000);
         if(!profile_metrics(expected?expected:"ready",recovery)) return 25;
-        printf("profiles: state=%s recovery=%d workers_running=2\n",expected?expected:"ready",recovery);
+        if(getenv("AMQP_PROBE_LEGACY_COMMAND")) {
+            int calls,completed,errors;
+            command_counts(&calls,&completed,&errors);
+            printf("legacy_commands: calls=%d completed=%d errors=%d\n",calls,completed,errors);
+        } else printf("profiles: state=%s recovery=%d workers_running=2\n",expected?expected:"ready",recovery);
     }
     if(!strcmp(mode,"publish") || !strcmp(mode,"process-publish")) {
         char *body=malloc(131073);
@@ -181,7 +210,7 @@ int main(int argc,char **argv)
     elapsed=switch_time_now()-start;
     counts(&c,&j,&e,&b,&r);
     printf("mode=%s result=%d workers=%d joined=%d early_pool_free=%d bindings=%d removed=%d publishes=%d in_publish_before_stop=%d elapsed_ms=%lld\n",mode,(int)result,c,j,e,b,r,send_started,send_active,(long long)(elapsed/1000));
-    if(result!=SWITCH_STATUS_SUCCESS || c<2 || c!=j || e || b!=r || elapsed>5000000) rc=18;
+    if(result!=SWITCH_STATUS_SUCCESS || c<(getenv("AMQP_PROBE_LEGACY_COMMAND")?1:2) || c!=j || e || b!=r || elapsed>5000000) rc=18;
     if(strcmp(mode,"process") && strcmp(mode,"process-publish")) {
         if(switch_loadable_module_exists("mod_amqp")==SWITCH_STATUS_SUCCESS || status_api()) rc=19;
         /* A second real load must be possible after all owners were destroyed. */

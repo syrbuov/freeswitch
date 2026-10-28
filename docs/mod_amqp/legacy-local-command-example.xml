@@ -1,0 +1,29 @@
+<!-- Local test only. Not installed. Replace RabbitMQ credentials and match
+     the application's exchange/binding/queue. Production uses <commands/>. -->
+<configuration name="amqp.conf" description="Legacy commands for local testing">
+  <commands>
+    <profile name="local-command">
+      <params>
+        <param name="exchange-name" value="TAP.Commands"/>
+        <param name="binding_key" value="commandBindingKey"/>
+        <param name="queue-name" value="local-command"/>
+        <param name="reconnect_interval_ms" value="1000"/>
+        <param name="queue-passive" value="false"/>
+        <param name="queue-durable" value="false"/>
+        <param name="queue-exclusive" value="false"/>
+        <param name="queue-auto-delete" value="true"/>
+      </params>
+      <connections>
+        <connection name="local">
+          <param name="hostname" value="127.0.0.1"/>
+          <param name="port" value="5672"/>
+          <param name="virtualhost" value="/"/>
+          <param name="username" value="REPLACE_WITH_LOCAL_AMQP_USER"/>
+          <param name="password" value="REPLACE_WITH_LOCAL_AMQP_PASSWORD"/>
+          <param name="connect-timeout-ms" value="3000"/>
+          <param name="rpc-timeout-ms" value="3000"/>
+        </connection>
+      </connections>
+    </profile>
+  </commands>
+</configuration>

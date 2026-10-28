@@ -1,4 +1,6 @@
 > Продолжение: [диагностика профилей и восстановление TCP](filter-engine-profile-diagnostics.md). DNS/TLS отложены пользователем.
+> В ветке local-test [прежние command-профили включены отдельно](legacy-local-commands.md);
+> описанное ниже отключение commands относится к базовому этапу producer/logging.
 
 # mod_amqp: producer/logging lifecycle без изменения Core
 

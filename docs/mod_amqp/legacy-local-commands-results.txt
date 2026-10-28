@@ -1,0 +1,88 @@
+mod_amqp branch split / legacy local commands, 2026-10-28
+ESL snapshot: codex/mod-amqp-commands-esl @ cf7a441125
+Local branch: codex/mod-amqp-commands-local-test, directly from 6bf07b9ba2
+Core/libs/esl and legacy command implementation unchanged; DNS/TLS deferred.
+No installation, working config change, restart or push.
+
+-Wall -Werror mod_amqp.la + make check: exit 0
+test_filter_engine: PASSED (19/19 tests in 0.184010s)
+test_producer_lifecycle: PASSED (18/18 tests in 0.015360s)
+test_producer_integration: PASSED (46/46 tests in 0.225990s)
+Integration address,undefined: PASSED (46/46 tests in 0.759915s)
+Integration thread: PASSED (46/46 tests in 2.622599s)
+
+Legacy command real-DSO: normal
+legacy-command-process: PASS exit 0
+  legacy_commands: calls=2 completed=2 errors=0
+  mode=process result=0 workers=1 joined=1 early_pool_free=0 bindings=0 removed=0 publishes=0 in_publish_before_stop=0 elapsed_ms=3738
+legacy-command-unload: PASS exit 0
+  legacy_commands: calls=2 completed=2 errors=0
+  mode=unload result=0 workers=1 joined=1 early_pool_free=0 bindings=0 removed=0 publishes=0 in_publish_before_stop=0 elapsed_ms=499
+
+Legacy command real-DSO: asan
+legacy-command-process: PASS exit 0
+  legacy_commands: calls=2 completed=2 errors=0
+  mode=process result=0 workers=1 joined=1 early_pool_free=0 bindings=0 removed=0 publishes=0 in_publish_before_stop=0 elapsed_ms=3689
+legacy-command-unload: PASS exit 0
+  legacy_commands: calls=2 completed=2 errors=0
+  mode=unload result=0 workers=1 joined=1 early_pool_free=0 bindings=0 removed=0 publishes=0 in_publish_before_stop=0 elapsed_ms=499
+
+Legacy command real-DSO: tsan
+legacy-command-process: FAIL exit 66 (TSan Core teardown)
+  legacy_commands: calls=2 completed=2 errors=0
+  WARNING: ThreadSanitizer: data race (pid=23493)
+  SUMMARY: ThreadSanitizer: data race memory/unix/fspr_pools.c:2109 in run_cleanups
+legacy-command-unload: FAIL exit 66 (TSan Core teardown)
+  legacy_commands: calls=2 completed=2 errors=0
+  mode=unload result=0 workers=1 joined=1 early_pool_free=0 bindings=0 removed=0 publishes=0 in_publish_before_stop=0 elapsed_ms=500
+  WARNING: ThreadSanitizer: data race (pid=23437)
+  SUMMARY: ThreadSanitizer: data race memory/unix/fspr_pools.c:2109 in run_cleanups
+
+Core-only reproduction: FAIL exit 66; mod_amqp never loaded; AMQP connections=0
+probe: initializing Core
+probe: loading module
+probe: Core-only bgapi; mod_amqp never loaded
+==================
+WARNING: ThreadSanitizer: data race (pid=23749)
+  Write of size 1 at 0x7b900004c258 by main thread:
+    #0 pthread_rwlock_destroy ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1397 (libtsan.so+0x408b1)
+    #1 run_cleanups memory/unix/fspr_pools.c:2109 (libfreeswitch.so.1+0x3a590e)
+    #2 fspr_pool_destroy memory/unix/fspr_pools.c:754 (libfreeswitch.so.1+0x3a590e)
+    #3 <null> <null> (libc.so.6+0x27249)
+
+  Previous atomic read of size 1 at 0x7b900004c258 by thread T10 (mutexes: read M111036999229817432):
+    #0 pthread_rwlock_unlock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1466 (libtsan.so+0x3efdd)
+    #1 bgapi_exec /usr/src/freeswitch/src/mod/applications/mod_commands/mod_commands.c:5414 (mod_commands.so+0x13fa1)
+
+  Location is heap block of size 8192 at 0x7b900004c000 allocated by main thread:
+    #0 malloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:647 (libtsan.so+0x3ebb8)
+    #1 allocator_alloc memory/unix/fspr_pools.c:300 (libfreeswitch.so.1+0x3a4f41)
+    #2 <null> <null> (libc.so.6+0x27249)
+
+  Mutex M111036999229817432 is already destroyed.
+
+  Thread T10 (tid=23760, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so+0x5e686)
+    #1 fspr_thread_create threadproc/unix/thread.c:194 (libfreeswitch.so.1+0x3aa7e1)
+    #2 bgapi_function /usr/src/freeswitch/src/mod/applications/mod_commands/mod_commands.c:5463 (mod_commands.so+0x13d73)
+    #3 main /usr/src/freeswitch/src/mod/event_handlers/mod_amqp/test/lifecycle_probe.c:138 (probe+0x3177)
+
+SUMMARY: ThreadSanitizer: data race memory/unix/fspr_pools.c:2109 in run_cleanups
+==================
+
+
+Producer/logging normal real-DSO with empty commands: 10/10 PASS, each exit 0
+blocked-publish: mode=publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=4
+declare-recovery: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+load-unload-cycle: mode=cycle result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+process-handshake: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2777
+process-publish: mode=process-publish result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=13 in_publish_before_stop=1 elapsed_ms=2636
+process-queue: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2779
+process-rpc: mode=process result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=2783
+reload-unload-race: mode=race result=0 workers=4 joined=4 early_pool_free=0 bindings=2 removed=2 publishes=0 in_publish_before_stop=0 elapsed_ms=1502
+unload-handshake: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+unload-rpc: mode=unload result=0 workers=2 joined=2 early_pool_free=0 bindings=1 removed=1 publishes=0 in_publish_before_stop=0 elapsed_ms=0
+
+No TSan suppression applied. The Core-only failure is preserved, not treated as a passing test.
+Sanitizers instrument module/harness/interposer, not installed Core/APR/mod_commands/rabbitmq-c.
+Legacy no_ack/console/management/RPC parser limits remain; production must have no command profiles.

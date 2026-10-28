@@ -1,3 +1,12 @@
+Local-test branch update (2026-10-28): legacy command profiles are restored for
+the trusted local test application. Production configurations must use empty
+`<commands/>` or omit that section. The command executor has no ESL dependency.
+See [the branch report](../../../../../docs/mod_amqp/legacy-local-commands.md).
+Use `python3 test/run_lifecycle_probes.py /tmp/amqp-legacy-probes --legacy-commands`
+for real console dispatch and idle-worker unload/process shutdown checks;
+`--sanitizer address,undefined` and `--sanitizer thread` are supported.
+The following notes describe the earlier producer/logging baseline.
+
 Profile diagnostics and TCP recovery (2026-10-28): `amqp profiles` returns a
 JSON snapshot of workers, connection phase, queues and counters; it rejects a
 busy lifecycle without waiting. Counters reset with the profile generation;

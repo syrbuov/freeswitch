@@ -129,6 +129,28 @@ class Broker:
                 self.stop.wait(15)
                 return
             conn.sendall(frame(channel, 40, 11))
+            if self.stage == "legacy-commands":
+                _, channel, payload = read_frame(conn)
+                assert payload[:4] == struct.pack("!HH", 50, 10)
+                queue = b"\x0dlocal-command"
+                conn.sendall(frame(channel, 50, 11, queue + struct.pack("!II", 0, 0)))
+                _, channel, payload = read_frame(conn)
+                assert payload[:4] == struct.pack("!HH", 50, 20)
+                conn.sendall(frame(channel, 50, 21))
+                _, channel, payload = read_frame(conn)
+                assert payload[:4] == struct.pack("!HH", 60, 20)
+                conn.sendall(frame(channel, 60, 21, b"\x03tag"))
+                for tag, body in enumerate([b"uuid_exists mod-amqp-local-test-missing-channel",
+                                           b"bgapi originate error/mod-amqp-local-test &park()"], 1):
+                    method = b"\x03tag" + struct.pack("!QB", tag, 0) + b"\x00\x00"
+                    header = struct.pack("!HHQH", 60, 0, len(body), 0)
+                    conn.sendall(frame(channel, 60, 60, method) +
+                                 struct.pack("!BHI", 2, channel, len(header)) + header + b"\xce" +
+                                 struct.pack("!BHI", 3, channel, len(body)) + body + b"\xce")
+                self.arrivals += 1
+                self.ready.touch()
+                self.stop.wait(15)
+                return
             self.mark_ready()
             # Stop reading completely: publisher must eventually fill the TCP socket.
             self.stop.wait(15)
@@ -166,7 +188,20 @@ def config(port, recovery=False):
       <params><param name="event_filter" value="DTMF"/><param name="reconnect_interval_ms" value="{interval}"/><param name="exchange-name" value="probe-events"/></params>
       {connection}</profile></producers><logging><profile name="probe-log">
       <params><param name="log-levels" value="err"/>{log_reconnect}<param name="exchange-name" value="probe-log"/></params>
-      {connection}</profile></logging><commands><profile name="disabled-command">{connection}</profile></commands>
+      {connection}</profile></logging><commands/>
+      </configuration></section></document>"""
+
+
+def legacy_config(port):
+    return f"""<document type="freeswitch/xml"><section name="configuration">
+      <configuration name="modules.conf"><modules/></configuration>
+      <configuration name="timezones.conf"><timezones><zone name="GMT" value="GMT0"/></timezones></configuration>
+      <configuration name="amqp.conf"><commands><profile name="local-command"><params>
+      <param name="exchange-name" value="local-commands"/><param name="queue-name" value="local-command"/>
+      <param name="binding_key" value="local-test"/><param name="reconnect_interval_ms" value="1000"/>
+      </params><connections><connection name="local"><param name="hostname" value="127.0.0.1"/>
+      <param name="port" value="{port}"/><param name="connect-timeout-ms" value="1000"/>
+      <param name="rpc-timeout-ms" value="1000"/></connection></connections></profile></commands>
       </configuration></section></document>"""
 
 
@@ -176,6 +211,8 @@ def main():
     parser.add_argument("--sanitizer", choices=["address,undefined", "thread"])
     parser.add_argument("--case", action="append", default=[], help="Run only the named scenario(s)")
     parser.add_argument("--gdb", action="store_true", help="Capture the isolated child's failure backtrace")
+    parser.add_argument("--legacy-commands", action="store_true", help="Probe trusted local legacy console commands")
+    parser.add_argument("--core-bgapi", action="store_true", help="Reproduce Core bgapi teardown without loading mod_amqp")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -208,14 +245,20 @@ def main():
         preload.insert(0, subprocess.check_output([cc, f"-print-file-name={library}"], text=True).strip())
     env["LD_PRELOAD"] = ":".join(preload)
     failures = []
-    for label, mode, stage in [
+    scenarios = [
         ("unload-handshake", "unload", "handshake"), ("unload-rpc", "unload", "rpc"),
         ("blocked-publish", "publish", "queue"), ("process-handshake", "process", "handshake"),
         ("process-rpc", "process", "rpc"), ("process-queue", "process", "queue"),
         ("process-publish", "process-publish", "queue"),
         ("declare-recovery", "unload", "declare-recovery"),
         ("reload-unload-race", "race", "handshake"), ("load-unload-cycle", "cycle", "handshake"),
-    ]:
+    ]
+    if args.legacy_commands:
+        scenarios = [("legacy-command-unload", "unload", "legacy-commands"),
+                     ("legacy-command-process", "process", "legacy-commands")]
+    if args.core_bgapi:
+        scenarios = [("core-bgapi", "core-bgapi", "legacy-commands")]
+    for label, mode, stage in scenarios:
         if args.case and label not in args.case:
             continue
         fixture = output / label
@@ -224,15 +267,17 @@ def main():
         ready.unlink(missing_ok=True)
         broker = Broker(stage, ready)
         try:
-            (fixture / "freeswitch.xml").write_text(config(broker.port, stage == "declare-recovery"))
+            (fixture / "freeswitch.xml").write_text(legacy_config(broker.port) if args.legacy_commands else config(broker.port, stage == "declare-recovery"))
             with (fixture / "probe.log").open("w") as log:
                 command = [str(binary_dir / "probe"), mode]
                 if args.gdb:
                     command = ["gdb", "-q", "-batch", "--return-child-result", "-ex", "run", "-ex", "thread apply all bt 10", "--args", *command]
-                result = subprocess.run(command, cwd=root,
-                    env=dict(env, AMQP_PROBE_ROOT=str(fixture), AMQP_PROBE_READY=str(ready),
+                child_env = dict(env, AMQP_PROBE_ROOT=str(fixture), AMQP_PROBE_READY=str(ready),
                         AMQP_PROBE_STATE="ready" if stage in ("queue", "declare-recovery") else "connecting",
-                        AMQP_PROBE_RECOVERY="true" if stage == "declare-recovery" else "false"),
+                        AMQP_PROBE_RECOVERY="true" if stage == "declare-recovery" else "false")
+                if args.legacy_commands or args.core_bgapi:
+                    child_env["AMQP_PROBE_LEGACY_COMMAND"] = "true"
+                result = subprocess.run(command, cwd=root, env=child_env,
                     stdout=log, stderr=subprocess.STDOUT, timeout=20)
             if stage == "declare-recovery" and (len(broker.retry_gaps) != 2 or min(broker.retry_gaps) < 0.18):
                 broker.errors.append(f"invalid reconnect delays: {broker.retry_gaps}")

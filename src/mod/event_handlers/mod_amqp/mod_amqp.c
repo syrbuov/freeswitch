@@ -70,7 +70,7 @@ static void mod_amqp_write_status(switch_stream_handle_t *stream)
 	switch_mutex_unlock(mod_amqp_globals.health_mutex);
 	name = state == MOD_AMQP_HEALTH_ACTIVE ? "ACTIVE" :
 		state == MOD_AMQP_HEALTH_DEGRADED ? "DEGRADED" : "RESTART_REQUIRED";
-	stream->write_function(stream, "+OK mod_amqp state=%s restart_required=%s commands=disabled detail=%s\n",
+	stream->write_function(stream, "+OK mod_amqp state=%s restart_required=%s commands=legacy-local-test detail=%s\n",
 		name, state == MOD_AMQP_HEALTH_RESTART_REQUIRED ? "true" : "false",
 		detail ? detail : "none");
 }
@@ -137,7 +137,7 @@ static void mod_amqp_write_profiles(switch_stream_handle_t *stream)
         stream->write_function(stream, "-ERR mod_amqp profile snapshot allocation failed\n");
         return;
     }
-    cJSON_AddStringToObject(root, "commands", "disabled");
+    cJSON_AddStringToObject(root, "commands", "legacy-local-test");
     cJSON_AddItemToObject(root, "producers", producers);
     cJSON_AddItemToObject(root, "logging", logging);
     for (hi = mod_amqp_globals.producer_hash ? switch_core_hash_first(mod_amqp_globals.producer_hash) : NULL;
@@ -263,9 +263,9 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_amqp_shutdown)
 	mod_amqp_logging_profile_t *logging;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 
-	/* Command profiles are disabled. Workers/callbacks never take this mutex,
-	 * so an external shutdown can wait for an in-flight config reload to end.
-	 * Returning early here would lose the Core registry after unprocess(). */
+	/* Legacy console execution is for local tests only: management commands
+	 * from its worker are unsupported. External shutdown waits for an in-flight
+	 * config reload; returning early would lose Core's registry after unprocess. */
 	switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);
 	if (mod_amqp_is_command_thread()) {
 		switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);

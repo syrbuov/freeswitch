@@ -177,3 +177,23 @@ FST_TEST_BEGIN(api_profiles_retained_owner_and_uint64_precision)
     cJSON_Delete(json);
 }
 FST_TEST_END()
+
+FST_TEST_BEGIN(legacy_command_profiles_activate_and_empty_commands_disable_them)
+{
+    char reply[4096] = {0};
+    mod_amqp_command_profile_t *command;
+    cJSON *json;
+    fst_check(integration_reload("<configuration><commands><profile name='local-test'/></commands></configuration>") == SWITCH_STATUS_SUCCESS);
+    command = switch_core_hash_find(mod_amqp_globals.command_hash, "local-test");
+    fst_check(command != NULL && command->running && command->command_thread != NULL);
+    fst_check(api_reply_request_command("api amqp status\n\n", reply, sizeof(reply)) == 0);
+    fst_check(strstr(reply, "commands=legacy-local-test") != NULL);
+    fst_check(api_reply_request_command("api amqp profiles\n\n", reply, sizeof(reply)) == 0);
+    json = cJSON_Parse(strchr(reply, '\n') + 1);
+    fst_check(json != NULL);
+    fst_check_string_equals(cJSON_GetObjectItem(json, "commands")->valuestring, "legacy-local-test");
+    cJSON_Delete(json);
+    fst_check(integration_reload("<configuration><commands/></configuration>") == SWITCH_STATUS_SUCCESS);
+    fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
+}
+FST_TEST_END()

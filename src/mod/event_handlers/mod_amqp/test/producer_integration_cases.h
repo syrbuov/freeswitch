@@ -395,13 +395,16 @@ FST_TEST_BEGIN(adjacent_creation_and_join_failures_reach_api)
 	const char *commands = "<configuration><commands><profile name='command'/></commands></configuration>";
 	const char *logging = "<configuration><logging><profile name='log'/></logging></configuration>";
 	fail_other_thread = 1;
-	fst_check(integration_reload(commands) == SWITCH_STATUS_SUCCESS);
+	fst_check(integration_reload(commands) != SWITCH_STATUS_SUCCESS);
 	fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
 	fst_check(integration_reload(logging) != SWITCH_STATUS_SUCCESS);
 	fst_check(switch_core_hash_empty(mod_amqp_globals.logging_hash));
 	fail_other_thread = 0;
 	fst_check(integration_reload(commands) == SWITCH_STATUS_SUCCESS);
-	fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
+	fst_check(switch_core_hash_find(mod_amqp_globals.command_hash, "command") != NULL);
+	fail_join = 1;
+	fst_check(integration_reload("<configuration/>") != SWITCH_STATUS_SUCCESS);
+	fst_check(switch_core_hash_find(mod_amqp_globals.command_hash, "command") != NULL);
 	fst_check(integration_reload("<configuration/>") == SWITCH_STATUS_SUCCESS);
 	fst_check(integration_reload(logging) == SWITCH_STATUS_SUCCESS);
 	fail_join = 1;
