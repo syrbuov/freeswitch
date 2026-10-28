@@ -38,6 +38,24 @@
 
 #include "mod_amqp.h"
 
+/* The management thread requests stop; the listener samples it between I/O.
+ * Never hold this mutex while joining or performing AMQP/console operations. */
+static void mod_amqp_command_set_running(mod_amqp_command_profile_t *profile, switch_bool_t running)
+{
+	switch_mutex_lock(profile->mutex);
+	profile->running = running;
+	switch_mutex_unlock(profile->mutex);
+}
+
+static switch_bool_t mod_amqp_command_is_running(mod_amqp_command_profile_t *profile)
+{
+	switch_bool_t running;
+	switch_mutex_lock(profile->mutex);
+	running = profile->running;
+	switch_mutex_unlock(profile->mutex);
+	return running;
+}
+
 switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **prof)
 {
 	switch_status_t ret;
@@ -52,7 +70,9 @@ switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **prof)
 	profile = *prof;
 	pool = profile->pool;
 
-	profile->running = 0;
+	if (profile->mutex) {
+		mod_amqp_command_set_running(profile, SWITCH_FALSE);
+	} /* A failed mutex init cannot have started a worker. */
 
 	if (profile->command_thread) {
 		if (switch_thread_join(&ret, profile->command_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
@@ -120,9 +140,10 @@ switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg)
 	profile->pool = pool;
 	profile->name = switch_core_strdup(profile->pool, name);
 	if (switch_mutex_init(&profile->mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		profile->mutex = NULL;
 		goto err;
 	}
-	profile->running = 1;
+	mod_amqp_command_set_running(profile, SWITCH_TRUE);
 	profile->reconnect_interval_ms = 1000;
 
         if (switch_event_create(&event, SWITCH_EVENT_GENERAL) != SWITCH_STATUS_SUCCESS) {
@@ -289,7 +310,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 	profile->command_thread_started = SWITCH_TRUE;
 	switch_mutex_unlock(profile->mutex);
 
-	while (profile->running) {
+	while (mod_amqp_command_is_running(profile)) {
 		amqp_queue_declare_ok_t *recv_queue;
 
 		/* Ensure we have an AMQP connection */
@@ -395,7 +416,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 			continue;
 		}
 
-		while (profile->running && profile->conn_active) {
+		while (mod_amqp_command_is_running(profile) && profile->conn_active) {
 			amqp_rpc_reply_t res;
 			amqp_envelope_t envelope;
 			struct timeval timeout = {0};
@@ -513,7 +534,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 		mod_amqp_connection_close(profile->conn_active);
 		profile->conn_active = NULL;
 
-		if (profile->running) {
+		if (mod_amqp_command_is_running(profile)) {
 			/* We'll reconnect, but sleep to avoid hammering resources */
 			switch_sleep(500);
 		}

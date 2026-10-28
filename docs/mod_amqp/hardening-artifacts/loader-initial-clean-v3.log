@@ -1,0 +1,2 @@
+scenario=initial-clean first_load=9 first_exists=1 api_absent=1 retry_load=0 retry_status=+OK mod_amqp state=ACTIVE restart_required=false detail=configuration active
+

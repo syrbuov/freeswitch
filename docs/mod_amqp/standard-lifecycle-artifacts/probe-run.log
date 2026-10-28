@@ -1,0 +1,5 @@
+cycle=0 load=0 unload=0 exists=1 api=0
+cycle=1 load=0 unload=0 exists=1 api=0
+cycle=2 load=0 unload=0 exists=1 api=0
+load=0 forced_unload=0 exists=1 status_before=1 status_after=0 dso_resident=1 reload_status=0 reload_reply=+OK mod_amqp configuration reloaded
+

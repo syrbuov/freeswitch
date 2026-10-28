@@ -7,6 +7,10 @@ static void integration_reset(void)
 	expected_old_unbinds = new_binding_before_old_removed = persistent_unbind_failure = 0;
 	config_snapshot = NULL;
 	fail_other_thread = fail_queue_at = fail_thread_at = fail_hash_at = 0;
+	fail_adjacent_mutex = 0;
+	worker_mode = WORKER_IDLE;
+	worker_io_entered = worker_sleep_entered = worker_queue_entered = 0;
+	worker_release_io = worker_release_sleep = worker_release_queue = 0;
 }
 
 static void integration_dispatch(switch_event_t *event)
@@ -75,10 +79,16 @@ static void *SWITCH_THREAD_FUNC integration_idle(switch_thread_t *thread, void *
 static switch_status_t integration_other_thread(switch_thread_t **thread, switch_threadattr_t *attr,
 	switch_thread_start_t start, void *data, switch_memory_pool_t *pool)
 {
-	(void)start;
 	if (fail_other_thread) {
 		*thread = (switch_thread_t *)data;
 		return SWITCH_STATUS_GENERR;
+	}
+	if (worker_mode != WORKER_IDLE) {
+		/* Queue wait needs an active connection, but never dereferences it. */
+		if (worker_mode == WORKER_QUEUE_WAIT && start == mod_amqp_logging_thread) {
+			((mod_amqp_logging_profile_t *)data)->conn_active = (mod_amqp_connection_t *)data;
+		}
+		return switch_thread_create(thread, attr, start, data, pool);
 	}
 	/* Adjacent workers do no network I/O; their real create/destroy/recv paths run. */
 	return switch_thread_create(thread, attr, integration_idle, data, pool);

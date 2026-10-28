@@ -1,0 +1,28 @@
+make: 'mod_amqp.la' is up to date.
+make  test/test_producer_lifecycle test/test_filter_engine test/test_producer_integration
+make[1]: Entering directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'
+  CC       test/test_producer_lifecycle-test_producer_lifecycle.o
+make[1]: 'test/test_filter_engine' is up to date.
+  CC       test/test_producer_integration-test_producer_integration.o
+  CCLD     test/test_producer_lifecycle
+  CCLD     test/test_producer_integration
+make[1]: Leaving directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'
+make  check-TESTS
+make[1]: Entering directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'
+make[2]: Entering directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'
+PASS: test/test_producer_lifecycle
+PASS: test/test_filter_engine
+PASS: test/test_producer_integration
+============================================================================
+Testsuite summary for freeswitch 1.10.13-dev
+============================================================================
+# TOTAL: 3
+# PASS:  3
+# SKIP:  0
+# XFAIL: 0
+# FAIL:  0
+# XPASS: 0
+# ERROR: 0
+============================================================================
+make[2]: Leaving directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'
+make[1]: Leaving directory '/usr/src/freeswitch/src/mod/event_handlers/mod_amqp'

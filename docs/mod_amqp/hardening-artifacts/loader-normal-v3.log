@@ -1,0 +1,5 @@
+scenario=normal load=0 unload=16 force=16 repeat=1 exists=0 binds_before=2 binds_after=2 deliveries=1 failed_unbinds=0 dso_resident=1 status=+OK mod_amqp state=ACTIVE restart_required=false detail=configuration active
+ reload=+OK Reloading XML
+-ERR unloading module [Module is not unloadable]
+-ERR loading module [Module already loaded]
+

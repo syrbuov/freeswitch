@@ -1,0 +1,13 @@
+--- production/mod_amqp.c
++++ probe/mod_amqp.c
+@@ -140,8 +140,8 @@
+ 	SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
+ 
+ 
+-	/* Core marks NOUNLOAD as permanent before publishing registry/interfaces. */
+-	return SWITCH_STATUS_NOUNLOAD;
++	/* Probe-only: ordinary load. Production source remains unchanged. */
++	return SWITCH_STATUS_SUCCESS;
+ }
+ 
+ /* ------------------------------

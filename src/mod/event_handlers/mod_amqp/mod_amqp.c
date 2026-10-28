@@ -44,8 +44,43 @@ SWITCH_MODULE_DEFINITION(mod_amqp, mod_amqp_load, mod_amqp_shutdown, NULL);
 
 mod_amqp_globals_t mod_amqp_globals;
 
+void mod_amqp_health_set(mod_amqp_health_t state, const char *detail)
+{
+	switch_mutex_lock(mod_amqp_globals.health_mutex);
+	mod_amqp_globals.health = state;
+	mod_amqp_globals.health_detail = detail;
+	switch_mutex_unlock(mod_amqp_globals.health_mutex);
+}
+
+void mod_amqp_health_note(const char *detail)
+{
+	switch_mutex_lock(mod_amqp_globals.health_mutex);
+	mod_amqp_globals.health_detail = detail;
+	switch_mutex_unlock(mod_amqp_globals.health_mutex);
+}
+
+static void mod_amqp_write_status(switch_stream_handle_t *stream)
+{
+	mod_amqp_health_t state;
+	const char *detail;
+	const char *name;
+	switch_mutex_lock(mod_amqp_globals.health_mutex);
+	state = mod_amqp_globals.health;
+	detail = mod_amqp_globals.health_detail;
+	switch_mutex_unlock(mod_amqp_globals.health_mutex);
+	name = state == MOD_AMQP_HEALTH_ACTIVE ? "ACTIVE" :
+		state == MOD_AMQP_HEALTH_DEGRADED ? "DEGRADED" : "RESTART_REQUIRED";
+	stream->write_function(stream, "+OK mod_amqp state=%s restart_required=%s detail=%s\n",
+		name, state == MOD_AMQP_HEALTH_RESTART_REQUIRED ? "true" : "false",
+		detail ? detail : "none");
+}
+
 SWITCH_STANDARD_API(amqp_reload)
 {
+	if (cmd && !strcmp(cmd, "status")) {
+		mod_amqp_write_status(stream);
+		return SWITCH_STATUS_SUCCESS;
+	}
 	/* Core appends a generic error for non-success API status; ESL replaces
 	 * that stream with "Command not found". Report the reload operation in
 	 * the stream and return success for the completed API invocation. */
@@ -66,13 +101,21 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
 {
 	switch_api_interface_t *api_interface;
 
+	/* A retained generation must never lose its owners to a second load. */
+	if (mod_amqp_globals.pool) return SWITCH_STATUS_GENERR;
 	memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals_t));
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
 	mod_amqp_globals.pool = pool;
 	if (switch_mutex_init(&mod_amqp_globals.lifecycle_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
 		return SWITCH_STATUS_GENERR;
 	}
+	if (switch_mutex_init(&mod_amqp_globals.health_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
+		return SWITCH_STATUS_GENERR;
+	}
+	mod_amqp_health_set(MOD_AMQP_HEALTH_DEGRADED, "initial activation in progress");
 	switch_core_hash_init(&(mod_amqp_globals.producer_hash));
 	switch_core_hash_init(&(mod_amqp_globals.command_hash));
 	switch_core_hash_init(&(mod_amqp_globals.logging_hash));
@@ -81,10 +124,15 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
 
 	/* Create producer profiles */
 	if (mod_amqp_do_config(SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
-		if (mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+		if (mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS) {
+			memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
+			return SWITCH_STATUS_GENERR;
+		}
 		/* Core accepts NOUNLOAD on load and pins the DSO. Retained callback or
 		 * worker resources must never point into an unloaded module. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "AMQP configuration failed and cleanup retained resources; pinning module\n");
+		mod_amqp_health_set(MOD_AMQP_HEALTH_RESTART_REQUIRED,
+			"initial activation failed; cleanup retained resources; process restart required");
 		SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
 		return SWITCH_STATUS_NOUNLOAD;
 	}
@@ -92,7 +140,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
 	SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
 
 
-	return SWITCH_STATUS_SUCCESS;
+	/* Core marks NOUNLOAD as permanent before publishing registry/interfaces. */
+	return SWITCH_STATUS_NOUNLOAD;
 }
 
 /* ------------------------------

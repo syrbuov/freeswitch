@@ -20,6 +20,8 @@ esac
 
 for amqp_sanitizer in address,undefined thread; do
 	amqp_binary="$amqp_output_dir/${amqp_test}_$amqp_sanitizer"
+	amqp_proxy_dir="$amqp_output_dir/$amqp_sanitizer"
+	mkdir -p "$amqp_proxy_dir"
 	set --
 	if [ "$amqp_test" = test_producer_integration ]; then
 		set -- "$amqp_dir/mod_amqp_connection.c" "$amqp_dir/mod_amqp_filter_parser.c" \
@@ -31,7 +33,7 @@ for amqp_sanitizer in address,undefined thread; do
 			-Wall -Werror \
 			-g -O1 -fPIC -shared "-fsanitize=$amqp_sanitizer" \
 			"$amqp_dir/test/api_reply_proxy.c" "$amqp_core_libdir/libfreeswitch.so" \
-			"-Wl,-rpath,$amqp_core_libdir" -o "$amqp_output_dir/mod_amqp_api_reply_proxy.so" \
+			"-Wl,-rpath,$amqp_core_libdir" -o "$amqp_proxy_dir/mod_amqp_api_reply_proxy.so" \
 			> "$amqp_binary.proxy.build.log" 2>&1; then
 			printf '%s: PROXY BUILD FAILED (%s.proxy.build.log)\n' "$amqp_sanitizer" "$amqp_binary"
 			amqp_failed=1
@@ -44,7 +46,7 @@ for amqp_sanitizer in address,undefined thread; do
 		-DSWITCH_API_VISIBILITY=1 -DCJSON_API_VISIBILITY=1 -DHAVE_VISIBILITY=1 -DHAVE_OPENSSL \
 		-Wall -Werror -Wno-unused-result -Wno-misleading-indentation -std=c99 -pedantic \
 		-Wdeclaration-after-statement -g -O1 -fno-omit-frame-pointer "-fsanitize=$amqp_sanitizer" \
-		"-DMOD_AMQP_API_PROXY_DIR=\"$amqp_output_dir\"" \
+		"-DMOD_AMQP_API_PROXY_DIR=\"$amqp_proxy_dir\"" \
 		"-DSWITCH_TEST_BASE_DIR_FOR_CONF=\"$amqp_dir/test\"" \
 		"-DSWITCH_TEST_BASE_DIR_OVERRIDE=\"$amqp_dir/test\"" \
 		"$amqp_dir/test/$amqp_test.c" "$@" "$amqp_core_libdir/libfreeswitch.so" -lrabbitmq \

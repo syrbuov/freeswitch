@@ -31,6 +31,15 @@ static int new_binding_before_old_removed, expected_old_unbinds;
 static const char *config_snapshot;
 static int persistent_unbind_failure, fail_other_thread;
 static int fail_queue_at, fail_thread_at, fail_hash_at;
+static int fail_adjacent_mutex;
+enum worker_test_mode { WORKER_IDLE, WORKER_IO_BLOCK, WORKER_SLEEP_BLOCK, WORKER_QUEUE_WAIT };
+static enum worker_test_mode worker_mode;
+static int worker_io_entered, worker_sleep_entered, worker_queue_entered;
+static int worker_release_io, worker_release_sleep, worker_release_queue;
+static switch_status_t integration_connection_open(mod_amqp_connection_t *, mod_amqp_connection_t **, char *, char *);
+static void integration_worker_sleep(switch_interval_time_t);
+static switch_status_t integration_queue_pop_timeout(switch_queue_t *, void **, switch_interval_time_t);
+static switch_status_t integration_adjacent_mutex_init(switch_mutex_t **, unsigned int, switch_memory_pool_t *);
 
 static void integration_dispatch(switch_event_t *);
 static void *integration_message_alloc(size_t);
@@ -77,8 +86,16 @@ static switch_status_t integration_logger(const switch_log_node_t *, switch_log_
 static switch_status_t integration_other_thread(switch_thread_t **, switch_threadattr_t *, switch_thread_start_t, void *, switch_memory_pool_t *);
 #define switch_thread_create integration_other_thread
 #define switch_thread_join lifecycle_join
+#define switch_mutex_init integration_adjacent_mutex_init
+#define mod_amqp_connection_open integration_connection_open
+#define switch_sleep integration_worker_sleep
+#define switch_queue_pop_timeout integration_queue_pop_timeout
 #include "../mod_amqp_logging.c"
 #include "../mod_amqp_command.c"
+#undef switch_queue_pop_timeout
+#undef switch_sleep
+#undef mod_amqp_connection_open
+#undef switch_mutex_init
 #undef switch_thread_join
 #undef switch_thread_create
 #endif
@@ -310,6 +327,7 @@ static void *SWITCH_THREAD_FUNC destroy_thread(switch_thread_t *thread, void *da
 
 #ifdef MOD_AMQP_INTEGRATION
 #include "producer_integration_helpers.h"
+#include "worker_loop_helpers.h"
 #endif
 
 FST_BEGIN()
@@ -369,6 +387,8 @@ FST_BEGIN()
 			switch_core_new_memory_pool(&fst_pool);
 			mod_amqp_globals.pool = fst_pool;
 			switch_mutex_init(&mod_amqp_globals.lifecycle_mutex, SWITCH_MUTEX_UNNESTED, fst_pool);
+			switch_mutex_init(&mod_amqp_globals.health_mutex, SWITCH_MUTEX_UNNESTED, fst_pool);
+			mod_amqp_health_set(MOD_AMQP_HEALTH_ACTIVE, "test active");
 			switch_mutex_init(&test_mutex, SWITCH_MUTEX_NESTED, fst_pool);
 			switch_thread_cond_create(&test_cond, fst_pool);
 			switch_core_hash_init(&mod_amqp_globals.producer_hash);
@@ -410,6 +430,7 @@ FST_BEGIN()
 
 #ifdef MOD_AMQP_INTEGRATION
 #include "producer_integration_cases.h"
+#include "worker_loop_cases.h"
 #include "api_reply_cases.h"
 #else
 		FST_TEST_BEGIN(null_and_repeated_destroy)

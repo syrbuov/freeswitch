@@ -1,0 +1,13 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index 78a59321a4..9aa8b4dd23 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -1,5 +1,6 @@
+ {
+     "files.associations": {
+         "switch.h": "c"
+-    }
++    },
++    "cmake.sourceDirectory": "/root/freeswitch-devcontainer/freeswitch-develop/src"
+ }
+\ No newline at end of file

@@ -1,0 +1,1746 @@
+diff --git a/src/mod/event_handlers/mod_amqp/Makefile.am b/src/mod/event_handlers/mod_amqp/Makefile.am
+index 4d1213c5ad..d058381a85 100644
+--- a/src/mod/event_handlers/mod_amqp/Makefile.am
++++ b/src/mod/event_handlers/mod_amqp/Makefile.am
+@@ -10,6 +10,10 @@ mod_amqp_la_CFLAGS   = $(AM_CFLAGS) $(AMQP_CFLAGS)
+ mod_amqp_la_LIBADD   = $(switch_builddir)/libfreeswitch.la
+ mod_amqp_la_LDFLAGS  = -avoid-version -module -no-undefined -shared $(AMQP_LIBS) $(SWITCH_AM_LDFLAGS)
+ 
++# A regenerated dummy .Plo must not leave an old object using the previous
++# layout of mod_amqp_globals or profile structs after mod_amqp.h changes.
++$(mod_amqp_la_OBJECTS): $(srcdir)/mod_amqp.h
++
+ noinst_LTLIBRARIES = test/mod_amqp_api_reply_proxy.la
+ test_mod_amqp_api_reply_proxy_la_SOURCES = test/api_reply_proxy.c
+ test_mod_amqp_api_reply_proxy_la_CFLAGS = $(AM_CFLAGS)
+@@ -29,12 +33,32 @@ test_test_filter_engine_CFLAGS = $(AM_CFLAGS) -I$(srcdir) \
+   -DSWITCH_TEST_BASE_DIR_OVERRIDE=\"$(abs_builddir)/test\"
+ test_test_filter_engine_LDADD = $(switch_builddir)/libfreeswitch.la
+ test_test_filter_engine_LDFLAGS = $(AM_LDFLAGS) -no-undefined
+-test_test_producer_integration_SOURCES = test/test_producer_integration.c test/producer_integration_helpers.h test/producer_integration_cases.h mod_amqp_connection.c mod_amqp_filter_parser.c mod_amqp_filter_compiler.c mod_amqp_filter_matcher.c
++test_test_producer_integration_SOURCES = test/test_producer_integration.c test/producer_integration_helpers.h test/producer_integration_cases.h test/worker_loop_helpers.h test/worker_loop_cases.h mod_amqp_connection.c mod_amqp_filter_parser.c mod_amqp_filter_compiler.c mod_amqp_filter_matcher.c
+ test_test_producer_integration_CFLAGS = $(test_test_producer_lifecycle_CFLAGS)
+ test_test_producer_integration_CFLAGS += -DMOD_AMQP_API_PROXY_DIR=\"$(abs_builddir)/test/.libs\"
+ test_test_producer_integration_DEPENDENCIES = test/mod_amqp_api_reply_proxy.la
+ test_test_producer_integration_LDADD = $(test_test_producer_lifecycle_LDADD)
+ test_test_producer_integration_LDFLAGS = $(test_test_producer_lifecycle_LDFLAGS) -ldl
++
++# These production sources are deliberately included into test translation
++# units so the fixtures can wrap selected calls.  State the edges explicitly:
++# an existing or freshly generated dependency file must not decide whether a
++# changed implementation is picked up by an ordinary make check.
++test/test_filter_engine-test_filter_engine.$(OBJEXT): \
++  $(srcdir)/mod_amqp_filter_parser.c $(srcdir)/mod_amqp_filter_compiler.c \
++  $(srcdir)/mod_amqp_filter_matcher.c $(srcdir)/mod_amqp_filter.h \
++  $(srcdir)/mod_amqp_filter_internal.h
++test/test_producer_lifecycle-test_producer_lifecycle.$(OBJEXT): \
++  $(srcdir)/mod_amqp_producer.c $(srcdir)/mod_amqp.h
++test/test_producer_integration-test_producer_integration.$(OBJEXT): \
++  $(srcdir)/test/test_producer_lifecycle.c $(srcdir)/mod_amqp_producer.c \
++  $(srcdir)/mod_amqp_utils.c $(srcdir)/mod_amqp.c \
++  $(srcdir)/mod_amqp_logging.c $(srcdir)/mod_amqp_command.c \
++  $(srcdir)/test/api_reply_helpers.h $(srcdir)/test/api_reply_cases.h \
++  $(srcdir)/test/producer_integration_helpers.h \
++  $(srcdir)/test/producer_integration_cases.h \
++  $(srcdir)/test/worker_loop_helpers.h $(srcdir)/test/worker_loop_cases.h \
++  $(srcdir)/mod_amqp.h
+ EXTRA_DIST = test/conf/freeswitch.xml test/README.md test/run_filter_engine_sanitizers.sh test/api_reply_cases.h test/api_reply_helpers.h
+ 
+ else
+diff --git a/src/mod/event_handlers/mod_amqp/mod_amqp.c b/src/mod/event_handlers/mod_amqp/mod_amqp.c
+index 8849b4f925..9b2ba97442 100644
+--- a/src/mod/event_handlers/mod_amqp/mod_amqp.c
++++ b/src/mod/event_handlers/mod_amqp/mod_amqp.c
+@@ -44,8 +44,43 @@ SWITCH_MODULE_DEFINITION(mod_amqp, mod_amqp_load, mod_amqp_shutdown, NULL);
+ 
+ mod_amqp_globals_t mod_amqp_globals;
+ 
++void mod_amqp_health_set(mod_amqp_health_t state, const char *detail)
++{
++	switch_mutex_lock(mod_amqp_globals.health_mutex);
++	mod_amqp_globals.health = state;
++	mod_amqp_globals.health_detail = detail;
++	switch_mutex_unlock(mod_amqp_globals.health_mutex);
++}
++
++void mod_amqp_health_note(const char *detail)
++{
++	switch_mutex_lock(mod_amqp_globals.health_mutex);
++	mod_amqp_globals.health_detail = detail;
++	switch_mutex_unlock(mod_amqp_globals.health_mutex);
++}
++
++static void mod_amqp_write_status(switch_stream_handle_t *stream)
++{
++	mod_amqp_health_t state;
++	const char *detail;
++	const char *name;
++	switch_mutex_lock(mod_amqp_globals.health_mutex);
++	state = mod_amqp_globals.health;
++	detail = mod_amqp_globals.health_detail;
++	switch_mutex_unlock(mod_amqp_globals.health_mutex);
++	name = state == MOD_AMQP_HEALTH_ACTIVE ? "ACTIVE" :
++		state == MOD_AMQP_HEALTH_DEGRADED ? "DEGRADED" : "RESTART_REQUIRED";
++	stream->write_function(stream, "+OK mod_amqp state=%s restart_required=%s detail=%s\n",
++		name, state == MOD_AMQP_HEALTH_RESTART_REQUIRED ? "true" : "false",
++		detail ? detail : "none");
++}
++
+ SWITCH_STANDARD_API(amqp_reload)
+ {
++	if (cmd && !strcmp(cmd, "status")) {
++		mod_amqp_write_status(stream);
++		return SWITCH_STATUS_SUCCESS;
++	}
+ 	/* Core appends a generic error for non-success API status; ESL replaces
+ 	 * that stream with "Command not found". Report the reload operation in
+ 	 * the stream and return success for the completed API invocation. */
+@@ -66,13 +101,21 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
+ {
+ 	switch_api_interface_t *api_interface;
+ 
++	/* A retained generation must never lose its owners to a second load. */
++	if (mod_amqp_globals.pool) return SWITCH_STATUS_GENERR;
+ 	memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals_t));
+ 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
+ 
+ 	mod_amqp_globals.pool = pool;
+ 	if (switch_mutex_init(&mod_amqp_globals.lifecycle_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) {
++		memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
+ 		return SWITCH_STATUS_GENERR;
+ 	}
++	if (switch_mutex_init(&mod_amqp_globals.health_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) {
++		memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
++		return SWITCH_STATUS_GENERR;
++	}
++	mod_amqp_health_set(MOD_AMQP_HEALTH_DEGRADED, "initial activation in progress");
+ 	switch_core_hash_init(&(mod_amqp_globals.producer_hash));
+ 	switch_core_hash_init(&(mod_amqp_globals.command_hash));
+ 	switch_core_hash_init(&(mod_amqp_globals.logging_hash));
+@@ -81,10 +124,15 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
+ 
+ 	/* Create producer profiles */
+ 	if (mod_amqp_do_config(SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+-		if (mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
++		if (mod_amqp_shutdown() == SWITCH_STATUS_SUCCESS) {
++			memset(&mod_amqp_globals, 0, sizeof(mod_amqp_globals));
++			return SWITCH_STATUS_GENERR;
++		}
+ 		/* Core accepts NOUNLOAD on load and pins the DSO. Retained callback or
+ 		 * worker resources must never point into an unloaded module. */
+ 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "AMQP configuration failed and cleanup retained resources; pinning module\n");
++		mod_amqp_health_set(MOD_AMQP_HEALTH_RESTART_REQUIRED,
++			"initial activation failed; cleanup retained resources; process restart required");
+ 		SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
+ 		return SWITCH_STATUS_NOUNLOAD;
+ 	}
+@@ -92,7 +140,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_amqp_load)
+ 	SWITCH_ADD_API(api_interface, "amqp", "amqp API", amqp_reload, "syntax");
+ 
+ 
+-	return SWITCH_STATUS_SUCCESS;
++	/* Core marks NOUNLOAD as permanent before publishing registry/interfaces. */
++	return SWITCH_STATUS_NOUNLOAD;
+ }
+ 
+ /* ------------------------------
+diff --git a/src/mod/event_handlers/mod_amqp/mod_amqp.h b/src/mod/event_handlers/mod_amqp/mod_amqp.h
+index e7846bd715..81606f2de5 100644
+--- a/src/mod/event_handlers/mod_amqp/mod_amqp.h
++++ b/src/mod/event_handlers/mod_amqp/mod_amqp.h
+@@ -210,10 +210,20 @@ typedef struct {
+   switch_memory_pool_t *pool;
+ } mod_amqp_logging_profile_t;
+ 
++typedef enum {
++  MOD_AMQP_HEALTH_ACTIVE,
++  MOD_AMQP_HEALTH_DEGRADED,
++  MOD_AMQP_HEALTH_RESTART_REQUIRED
++} mod_amqp_health_t;
++
+ typedef struct mod_amqp_globals_s {
+   switch_memory_pool_t *pool;
+   /* Management only: never acquired by producer callbacks or sender threads. */
+   switch_mutex_t *lifecycle_mutex;
++  /* Status API never waits for lifecycle teardown. Protects health and detail. */
++  switch_mutex_t *health_mutex;
++  mod_amqp_health_t health;
++  const char *health_detail; /* Static, credential-free diagnostic text. */
+   switch_bool_t shutting_down;
+   switch_bool_t logging_bound;
+ 
+@@ -226,6 +236,8 @@ extern mod_amqp_globals_t mod_amqp_globals;
+ 
+ /* utils */
+ switch_status_t mod_amqp_do_config(switch_bool_t reload);
++void mod_amqp_health_set(mod_amqp_health_t state, const char *detail);
++void mod_amqp_health_note(const char *detail);
+ switch_bool_t mod_amqp_is_command_thread(void);
+ int mod_amqp_log_if_amqp_error(amqp_rpc_reply_t x, char const *context);
+ int mod_amqp_count_chars(const char* string, char ch);
+diff --git a/src/mod/event_handlers/mod_amqp/mod_amqp_command.c b/src/mod/event_handlers/mod_amqp/mod_amqp_command.c
+index 39389e3da1..0c4b66ce1a 100644
+--- a/src/mod/event_handlers/mod_amqp/mod_amqp_command.c
++++ b/src/mod/event_handlers/mod_amqp/mod_amqp_command.c
+@@ -38,6 +38,24 @@
+ 
+ #include "mod_amqp.h"
+ 
++/* The management thread requests stop; the listener samples it between I/O.
++ * Never hold this mutex while joining or performing AMQP/console operations. */
++static void mod_amqp_command_set_running(mod_amqp_command_profile_t *profile, switch_bool_t running)
++{
++	switch_mutex_lock(profile->mutex);
++	profile->running = running;
++	switch_mutex_unlock(profile->mutex);
++}
++
++static switch_bool_t mod_amqp_command_is_running(mod_amqp_command_profile_t *profile)
++{
++	switch_bool_t running;
++	switch_mutex_lock(profile->mutex);
++	running = profile->running;
++	switch_mutex_unlock(profile->mutex);
++	return running;
++}
++
+ switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **prof)
+ {
+ 	switch_status_t ret;
+@@ -52,7 +70,9 @@ switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **prof)
+ 	profile = *prof;
+ 	pool = profile->pool;
+ 
+-	profile->running = 0;
++	if (profile->mutex) {
++		mod_amqp_command_set_running(profile, SWITCH_FALSE);
++	} /* A failed mutex init cannot have started a worker. */
+ 
+ 	if (profile->command_thread) {
+ 		if (switch_thread_join(&ret, profile->command_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+@@ -120,9 +140,10 @@ switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg)
+ 	profile->pool = pool;
+ 	profile->name = switch_core_strdup(profile->pool, name);
+ 	if (switch_mutex_init(&profile->mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
++		profile->mutex = NULL;
+ 		goto err;
+ 	}
+-	profile->running = 1;
++	mod_amqp_command_set_running(profile, SWITCH_TRUE);
+ 	profile->reconnect_interval_ms = 1000;
+ 
+         if (switch_event_create(&event, SWITCH_EVENT_GENERAL) != SWITCH_STATUS_SUCCESS) {
+@@ -289,7 +310,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void
+ 	profile->command_thread_started = SWITCH_TRUE;
+ 	switch_mutex_unlock(profile->mutex);
+ 
+-	while (profile->running) {
++	while (mod_amqp_command_is_running(profile)) {
+ 		amqp_queue_declare_ok_t *recv_queue;
+ 
+ 		/* Ensure we have an AMQP connection */
+@@ -395,7 +416,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void
+ 			continue;
+ 		}
+ 
+-		while (profile->running && profile->conn_active) {
++		while (mod_amqp_command_is_running(profile) && profile->conn_active) {
+ 			amqp_rpc_reply_t res;
+ 			amqp_envelope_t envelope;
+ 			struct timeval timeout = {0};
+@@ -513,7 +534,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void
+ 		mod_amqp_connection_close(profile->conn_active);
+ 		profile->conn_active = NULL;
+ 
+-		if (profile->running) {
++		if (mod_amqp_command_is_running(profile)) {
+ 			/* We'll reconnect, but sleep to avoid hammering resources */
+ 			switch_sleep(500);
+ 		}
+diff --git a/src/mod/event_handlers/mod_amqp/mod_amqp_logging.c b/src/mod/event_handlers/mod_amqp/mod_amqp_logging.c
+index 5392559cb3..2259ce9e03 100644
+--- a/src/mod/event_handlers/mod_amqp/mod_amqp_logging.c
++++ b/src/mod/event_handlers/mod_amqp/mod_amqp_logging.c
+@@ -38,6 +38,24 @@
+ 
+ #include "mod_amqp.h"
+ 
++/* Shared only by the manager and sender. Keep lock scope outside queue and
++ * AMQP calls; a blocked I/O call may still delay the subsequent join. */
++static void mod_amqp_logging_set_running(mod_amqp_logging_profile_t *profile, switch_bool_t running)
++{
++	switch_mutex_lock(profile->mutex);
++	profile->running = running;
++	switch_mutex_unlock(profile->mutex);
++}
++
++static switch_bool_t mod_amqp_logging_is_running(mod_amqp_logging_profile_t *profile)
++{
++	switch_bool_t running;
++	switch_mutex_lock(profile->mutex);
++	running = profile->running;
++	switch_mutex_unlock(profile->mutex);
++	return running;
++}
++
+ switch_status_t mod_amqp_logging_recv(const switch_log_node_t *node, switch_log_level_t level)
+ {
+ 	switch_hash_index_t *hi = NULL;
+@@ -124,7 +142,9 @@ switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
+ 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
+ 	}
+ 
+-	profile->running = 0;
++	if (profile->mutex) {
++		mod_amqp_logging_set_running(profile, SWITCH_FALSE);
++	} /* A failed mutex init cannot have started a worker. */
+ 
+ 	if (profile->logging_thread) {
+ 		if (switch_thread_join(&status, profile->logging_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+@@ -178,7 +198,11 @@ switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg)
+ 	profile = switch_core_alloc(pool, sizeof(mod_amqp_logging_profile_t));
+ 	profile->pool = pool;
+ 	profile->name = switch_core_strdup(profile->pool, name);
+-	profile->running = 1;
++	if (switch_mutex_init(&profile->mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
++		profile->mutex = NULL;
++		goto err;
++	}
++	mod_amqp_logging_set_running(profile, SWITCH_TRUE);
+ 	profile->conn_root   = NULL;
+ 	profile->conn_active = NULL;
+ 	profile->log_level_mask = 0;
+@@ -328,7 +352,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void
+   amqp_boolean_t passive = 0;
+   amqp_boolean_t durable = 1;
+ 
+-  while (profile->running) {
++  while (mod_amqp_logging_is_running(profile)) {
+     if (!profile->conn_active) {
+       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");
+ 
+diff --git a/src/mod/event_handlers/mod_amqp/mod_amqp_utils.c b/src/mod/event_handlers/mod_amqp/mod_amqp_utils.c
+index 0df5e953d8..e3e9533b97 100644
+--- a/src/mod/event_handlers/mod_amqp/mod_amqp_utils.c
++++ b/src/mod/event_handlers/mod_amqp/mod_amqp_utils.c
+@@ -178,20 +178,30 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
+ 	switch_status_t status = SWITCH_STATUS_GENERR;
+ 	amqp_prepared_item_t *prepared = NULL, *item;
+ 	switch_hash_index_t *hi = NULL;
++	switch_bool_t change_started = SWITCH_FALSE;
++	switch_bool_t preparation_failed = SWITCH_FALSE;
+ 
+ 	/* Never wait: teardown may be joining an AMQP command worker calling us. */
+ 	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
+ 	if (mod_amqp_globals.shutting_down || (reload && mod_amqp_is_command_thread())) goto done;
+-	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) goto done;
++	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) {
++		preparation_failed = SWITCH_TRUE;
++		goto done;
++	}
+ 	/* This uses the existing XML snapshot. It does not invoke reloadxml. */
+-	if (amqp_prepare_set(cfg, &prepared) != SWITCH_STATUS_SUCCESS) goto done;
++	if (amqp_prepare_set(cfg, &prepared) != SWITCH_STATUS_SUCCESS) {
++		preparation_failed = SWITCH_TRUE;
++		goto done;
++	}
+ 
+ 	if (reload) {
+ 		/* No new bindings until ALL old producers have been destroyed. */
++		change_started = SWITCH_TRUE;
+ 		if (amqp_destroy_producers(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) goto done;
+ 	} else if (!switch_core_hash_empty(mod_amqp_globals.producer_hash)) {
+ 		goto done;
+ 	}
++	change_started = SWITCH_TRUE;
+ 	for (item = prepared; item; item = item->next) {
+ 		if (mod_amqp_producer_activate(item->prepared) != SWITCH_STATUS_SUCCESS) {
+ 			/* No rollback of the old set. Cleanup includes the failed owner. */
+@@ -239,6 +249,15 @@ restore_logger:
+ 		} else status = SWITCH_STATUS_GENERR;
+ 	}
+ done:
++	if (status == SWITCH_STATUS_SUCCESS) {
++		mod_amqp_health_set(MOD_AMQP_HEALTH_ACTIVE, "configuration active");
++	} else if (change_started) {
++		mod_amqp_health_set(MOD_AMQP_HEALTH_DEGRADED,
++			"configuration switch failed after teardown began; retry config reload or restart");
++	} else if (preparation_failed) {
++		/* Whatever runtime state existed before preparation remains unchanged. */
++		mod_amqp_health_note("configuration preparation failed; existing runtime set unchanged");
++	}
+ 	switch_safe_free(hi);
+ 	amqp_prepared_set_destroy(&prepared);
+ 	if (xml) switch_xml_free(xml);
+diff --git a/src/mod/event_handlers/mod_amqp/test/api_reply_cases.h b/src/mod/event_handlers/mod_amqp/test/api_reply_cases.h
+index 1c86567e76..88fe4e5794 100644
+--- a/src/mod/event_handlers/mod_amqp/test/api_reply_cases.h
++++ b/src/mod/event_handlers/mod_amqp/test/api_reply_cases.h
+@@ -9,6 +9,53 @@ FST_TEST_BEGIN(api_reply_success_over_esl)
+ }
+ FST_TEST_END()
+ 
++FST_TEST_BEGIN(api_status_preserves_active_after_preparation_error)
++{
++	char reply[256] = {0};
++	config_snapshot = CONFIG_NEW;
++	fst_check(api_reply_request(reply, sizeof(reply)) == 0);
++	fst_check_string_equals(reply, "+OK mod_amqp configuration reloaded\n");
++	config_snapshot = "<configuration><producers><profile name='bad'><filter mode='wrong'/></profile></producers></configuration>";
++	fst_check(api_reply_request(reply, sizeof(reply)) == 0);
++	fst_check_string_equals(reply, "-ERR mod_amqp configuration reload failed\n");
++	fst_check(api_reply_request_command("api amqp status\n\n", reply, sizeof(reply)) == 0);
++	fst_check(strstr(reply, "state=ACTIVE restart_required=false") != NULL);
++	fst_check(integration_find("new") != NULL);
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(api_status_degraded_then_recovered)
++{
++	char reply[256] = {0};
++	config_snapshot = "<configuration><producers>" PROFILE_NEW
++		"<profile name='second'>" RULE_DTMF "</profile></producers></configuration>";
++	fail_queue_at = queue_creations + 2;
++	fst_check(api_reply_request(reply, sizeof(reply)) == 0);
++	fst_check_string_equals(reply, "-ERR mod_amqp configuration reload failed\n");
++	fst_check(api_reply_request_command("api amqp status\n\n", reply, sizeof(reply)) == 0);
++	fst_check(strstr(reply, "state=DEGRADED restart_required=false") != NULL);
++	fail_queue_at = 0;
++	config_snapshot = CONFIG_NEW;
++	fst_check(api_reply_request(reply, sizeof(reply)) == 0);
++	fst_check_string_equals(reply, "+OK mod_amqp configuration reloaded\n");
++	fst_check(api_reply_request_command("api amqp status\n\n", reply, sizeof(reply)) == 0);
++	fst_check(strstr(reply, "state=ACTIVE restart_required=false") != NULL);
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(api_status_available_when_restart_required)
++{
++	char reply[256] = {0};
++	mod_amqp_health_set(MOD_AMQP_HEALTH_RESTART_REQUIRED, "test retained owner; process restart required");
++	mod_amqp_globals.shutting_down = SWITCH_TRUE;
++	fst_check(api_reply_request_command("api amqp status\n\n", reply, sizeof(reply)) == 0);
++	fst_check(strstr(reply, "state=RESTART_REQUIRED restart_required=true") != NULL);
++	fst_check(api_reply_request(reply, sizeof(reply)) == 0);
++	fst_check_string_equals(reply, "-ERR mod_amqp configuration reload failed\n");
++	mod_amqp_globals.shutting_down = SWITCH_FALSE;
++}
++FST_TEST_END()
++
+ FST_TEST_BEGIN(api_reply_invalid_mode_over_esl)
+ {
+ 	char reply[128] = { 0 };
+diff --git a/src/mod/event_handlers/mod_amqp/test/api_reply_helpers.h b/src/mod/event_handlers/mod_amqp/test/api_reply_helpers.h
+index afbb5036d6..5971a94505 100644
+--- a/src/mod/event_handlers/mod_amqp/test/api_reply_helpers.h
++++ b/src/mod/event_handlers/mod_amqp/test/api_reply_helpers.h
+@@ -48,7 +48,7 @@ static int api_reply_send(int fd, const char *command)
+ 	return 0;
+ }
+ 
+-static int api_reply_request(char *reply, size_t capacity)
++static int api_reply_request_command(const char *api_command, char *reply, size_t capacity)
+ {
+ 	struct sockaddr_in address;
+ 	char greeting[1024], auth[1024];
+@@ -76,10 +76,15 @@ static int api_reply_request(char *reply, size_t capacity)
+ 	if (api_reply_send(fd, "auth " AMQP_API_REPLY_TEST_PASSWORD "\n\n") != 0 ||
+ 		api_reply_read_packet(fd, auth, sizeof(auth)) != 0 ||
+ 		!strstr(auth, "Reply-Text: +OK")) goto done;
+-	if (api_reply_send(fd, "api amqp\n\n") != 0 ||
++	if (api_reply_send(fd, api_command) != 0 ||
+ 		api_reply_read_packet(fd, reply, capacity) != 0) goto done;
+ 	status = 0;
+ done:
+ 	close(fd);
+ 	return status;
+ }
++
++static int api_reply_request(char *reply, size_t capacity)
++{
++	return api_reply_request_command("api amqp\n\n", reply, capacity);
++}
+diff --git a/src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h b/src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h
+index 2c77b71ea7..4b857621f2 100644
+--- a/src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h
++++ b/src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h
+@@ -7,6 +7,10 @@ static void integration_reset(void)
+ 	expected_old_unbinds = new_binding_before_old_removed = persistent_unbind_failure = 0;
+ 	config_snapshot = NULL;
+ 	fail_other_thread = fail_queue_at = fail_thread_at = fail_hash_at = 0;
++	fail_adjacent_mutex = 0;
++	worker_mode = WORKER_IDLE;
++	worker_io_entered = worker_sleep_entered = worker_queue_entered = 0;
++	worker_release_io = worker_release_sleep = worker_release_queue = 0;
+ }
+ 
+ static void integration_dispatch(switch_event_t *event)
+@@ -75,11 +79,17 @@ static void *SWITCH_THREAD_FUNC integration_idle(switch_thread_t *thread, void *
+ static switch_status_t integration_other_thread(switch_thread_t **thread, switch_threadattr_t *attr,
+ 	switch_thread_start_t start, void *data, switch_memory_pool_t *pool)
+ {
+-	(void)start;
+ 	if (fail_other_thread) {
+ 		*thread = (switch_thread_t *)data;
+ 		return SWITCH_STATUS_GENERR;
+ 	}
++	if (worker_mode != WORKER_IDLE) {
++		/* Queue wait needs an active connection, but never dereferences it. */
++		if (worker_mode == WORKER_QUEUE_WAIT && start == mod_amqp_logging_thread) {
++			((mod_amqp_logging_profile_t *)data)->conn_active = (mod_amqp_connection_t *)data;
++		}
++		return switch_thread_create(thread, attr, start, data, pool);
++	}
+ 	/* Adjacent workers do no network I/O; their real create/destroy/recv paths run. */
+ 	return switch_thread_create(thread, attr, integration_idle, data, pool);
+ }
+diff --git a/src/mod/event_handlers/mod_amqp/test/run_filter_engine_sanitizers.sh b/src/mod/event_handlers/mod_amqp/test/run_filter_engine_sanitizers.sh
+index 469398ce41..7b7b8b6444 100644
+--- a/src/mod/event_handlers/mod_amqp/test/run_filter_engine_sanitizers.sh
++++ b/src/mod/event_handlers/mod_amqp/test/run_filter_engine_sanitizers.sh
+@@ -20,6 +20,8 @@ esac
+ 
+ for amqp_sanitizer in address,undefined thread; do
+ 	amqp_binary="$amqp_output_dir/${amqp_test}_$amqp_sanitizer"
++	amqp_proxy_dir="$amqp_output_dir/$amqp_sanitizer"
++	mkdir -p "$amqp_proxy_dir"
+ 	set --
+ 	if [ "$amqp_test" = test_producer_integration ]; then
+ 		set -- "$amqp_dir/mod_amqp_connection.c" "$amqp_dir/mod_amqp_filter_parser.c" \
+@@ -31,7 +33,7 @@ for amqp_sanitizer in address,undefined thread; do
+ 			-Wall -Werror \
+ 			-g -O1 -fPIC -shared "-fsanitize=$amqp_sanitizer" \
+ 			"$amqp_dir/test/api_reply_proxy.c" "$amqp_core_libdir/libfreeswitch.so" \
+-			"-Wl,-rpath,$amqp_core_libdir" -o "$amqp_output_dir/mod_amqp_api_reply_proxy.so" \
++			"-Wl,-rpath,$amqp_core_libdir" -o "$amqp_proxy_dir/mod_amqp_api_reply_proxy.so" \
+ 			> "$amqp_binary.proxy.build.log" 2>&1; then
+ 			printf '%s: PROXY BUILD FAILED (%s.proxy.build.log)\n' "$amqp_sanitizer" "$amqp_binary"
+ 			amqp_failed=1
+@@ -44,7 +46,7 @@ for amqp_sanitizer in address,undefined thread; do
+ 		-DSWITCH_API_VISIBILITY=1 -DCJSON_API_VISIBILITY=1 -DHAVE_VISIBILITY=1 -DHAVE_OPENSSL \
+ 		-Wall -Werror -Wno-unused-result -Wno-misleading-indentation -std=c99 -pedantic \
+ 		-Wdeclaration-after-statement -g -O1 -fno-omit-frame-pointer "-fsanitize=$amqp_sanitizer" \
+-		"-DMOD_AMQP_API_PROXY_DIR=\"$amqp_output_dir\"" \
++		"-DMOD_AMQP_API_PROXY_DIR=\"$amqp_proxy_dir\"" \
+ 		"-DSWITCH_TEST_BASE_DIR_FOR_CONF=\"$amqp_dir/test\"" \
+ 		"-DSWITCH_TEST_BASE_DIR_OVERRIDE=\"$amqp_dir/test\"" \
+ 		"$amqp_dir/test/$amqp_test.c" "$@" "$amqp_core_libdir/libfreeswitch.so" -lrabbitmq \
+diff --git a/src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c b/src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c
+index 5c8991280f..d12756a69c 100644
+--- a/src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c
++++ b/src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c
+@@ -31,6 +31,15 @@ static int new_binding_before_old_removed, expected_old_unbinds;
+ static const char *config_snapshot;
+ static int persistent_unbind_failure, fail_other_thread;
+ static int fail_queue_at, fail_thread_at, fail_hash_at;
++static int fail_adjacent_mutex;
++enum worker_test_mode { WORKER_IDLE, WORKER_IO_BLOCK, WORKER_SLEEP_BLOCK, WORKER_QUEUE_WAIT };
++static enum worker_test_mode worker_mode;
++static int worker_io_entered, worker_sleep_entered, worker_queue_entered;
++static int worker_release_io, worker_release_sleep, worker_release_queue;
++static switch_status_t integration_connection_open(mod_amqp_connection_t *, mod_amqp_connection_t **, char *, char *);
++static void integration_worker_sleep(switch_interval_time_t);
++static switch_status_t integration_queue_pop_timeout(switch_queue_t *, void **, switch_interval_time_t);
++static switch_status_t integration_adjacent_mutex_init(switch_mutex_t **, unsigned int, switch_memory_pool_t *);
+ 
+ static void integration_dispatch(switch_event_t *);
+ static void *integration_message_alloc(size_t);
+@@ -77,8 +86,16 @@ static switch_status_t integration_logger(const switch_log_node_t *, switch_log_
+ static switch_status_t integration_other_thread(switch_thread_t **, switch_threadattr_t *, switch_thread_start_t, void *, switch_memory_pool_t *);
+ #define switch_thread_create integration_other_thread
+ #define switch_thread_join lifecycle_join
++#define switch_mutex_init integration_adjacent_mutex_init
++#define mod_amqp_connection_open integration_connection_open
++#define switch_sleep integration_worker_sleep
++#define switch_queue_pop_timeout integration_queue_pop_timeout
+ #include "../mod_amqp_logging.c"
+ #include "../mod_amqp_command.c"
++#undef switch_queue_pop_timeout
++#undef switch_sleep
++#undef mod_amqp_connection_open
++#undef switch_mutex_init
+ #undef switch_thread_join
+ #undef switch_thread_create
+ #endif
+@@ -310,6 +327,7 @@ static void *SWITCH_THREAD_FUNC destroy_thread(switch_thread_t *thread, void *da
+ 
+ #ifdef MOD_AMQP_INTEGRATION
+ #include "producer_integration_helpers.h"
++#include "worker_loop_helpers.h"
+ #endif
+ 
+ FST_BEGIN()
+@@ -369,6 +387,8 @@ FST_BEGIN()
+ 			switch_core_new_memory_pool(&fst_pool);
+ 			mod_amqp_globals.pool = fst_pool;
+ 			switch_mutex_init(&mod_amqp_globals.lifecycle_mutex, SWITCH_MUTEX_UNNESTED, fst_pool);
++			switch_mutex_init(&mod_amqp_globals.health_mutex, SWITCH_MUTEX_UNNESTED, fst_pool);
++			mod_amqp_health_set(MOD_AMQP_HEALTH_ACTIVE, "test active");
+ 			switch_mutex_init(&test_mutex, SWITCH_MUTEX_NESTED, fst_pool);
+ 			switch_thread_cond_create(&test_cond, fst_pool);
+ 			switch_core_hash_init(&mod_amqp_globals.producer_hash);
+@@ -410,6 +430,7 @@ FST_BEGIN()
+ 
+ #ifdef MOD_AMQP_INTEGRATION
+ #include "producer_integration_cases.h"
++#include "worker_loop_cases.h"
+ #include "api_reply_cases.h"
+ #else
+ 		FST_TEST_BEGIN(null_and_repeated_destroy)
+diff --git a/docs/mod_amqp/acceptance-artifacts/conf/freeswitch.xml b/docs/mod_amqp/acceptance-artifacts/conf/freeswitch.xml
+new file mode 100644
+index 0000000000..d36d52ef32
+--- /dev/null
++++ b/docs/mod_amqp/acceptance-artifacts/conf/freeswitch.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0"?>
++<document type="freeswitch/xml">
++  <section name="configuration">
++    <configuration name="modules.conf"><modules/></configuration>
++    <configuration name="timezones.conf"><timezones><zone name="GMT" value="GMT0"/></timezones></configuration>
++    <configuration name="amqp.conf">
++      <producers>
++        <profile name="acceptance-fault">
++          <params><param name="event_filter" value="DTMF,CUSTOM"/></params>
++        </profile>
++      </producers>
++      <commands/>
++      <logging/>
++    </configuration>
++  </section>
++</document>
+diff --git a/docs/mod_amqp/acceptance-artifacts/loader-fault-freeswitch.xml b/docs/mod_amqp/acceptance-artifacts/loader-fault-freeswitch.xml
+new file mode 100644
+index 0000000000..d36d52ef32
+--- /dev/null
++++ b/docs/mod_amqp/acceptance-artifacts/loader-fault-freeswitch.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0"?>
++<document type="freeswitch/xml">
++  <section name="configuration">
++    <configuration name="modules.conf"><modules/></configuration>
++    <configuration name="timezones.conf"><timezones><zone name="GMT" value="GMT0"/></timezones></configuration>
++    <configuration name="amqp.conf">
++      <producers>
++        <profile name="acceptance-fault">
++          <params><param name="event_filter" value="DTMF,CUSTOM"/></params>
++        </profile>
++      </producers>
++      <commands/>
++      <logging/>
++    </configuration>
++  </section>
++</document>
+diff --git a/docs/mod_amqp/acceptance-artifacts/loader-fault-interposer.c b/docs/mod_amqp/acceptance-artifacts/loader-fault-interposer.c
+new file mode 100644
+index 0000000000..ff6ad03f98
+--- /dev/null
++++ b/docs/mod_amqp/acceptance-artifacts/loader-fault-interposer.c
+@@ -0,0 +1,87 @@
++/* Acceptance-only fixture: fail exactly one producer event unbind. */
++#include <switch.h>
++#include <dlfcn.h>
++#include <stdatomic.h>
++#include <string.h>
++
++static atomic_int fail_next_unbind;
++static atomic_int failed_unbinds;
++static atomic_int fail_all_unbinds;
++static atomic_int fail_amqp_bind_at;
++static atomic_int amqp_bind_calls;
++static atomic_int amqp_deliveries;
++static switch_event_callback_t amqp_callback;
++
++void amqp_acceptance_fail_next_unbind(void)
++{
++	atomic_store(&fail_next_unbind, 1);
++}
++
++void amqp_acceptance_fail_all_unbinds(void)
++{
++	atomic_store(&fail_all_unbinds, 1);
++}
++
++void amqp_acceptance_fail_amqp_bind_at(int ordinal)
++{
++	atomic_store(&fail_amqp_bind_at, ordinal);
++}
++
++int amqp_acceptance_failed_unbinds(void)
++{
++	return atomic_load(&failed_unbinds);
++}
++
++int amqp_acceptance_bind_calls(void)
++{
++	return atomic_load(&amqp_bind_calls);
++}
++
++int amqp_acceptance_deliveries(void)
++{
++	return atomic_load(&amqp_deliveries);
++}
++
++static void amqp_acceptance_callback(switch_event_t *event)
++{
++	if (event->event_id == SWITCH_EVENT_DTMF && switch_event_get_header(event, "AMQP-Harness")) {
++		atomic_fetch_add(&amqp_deliveries, 1);
++	}
++	amqp_callback(event);
++}
++
++SWITCH_DECLARE(switch_status_t) switch_event_unbind(switch_event_node_t **node)
++{
++	void *symbol;
++	switch_status_t (*next_unbind)(switch_event_node_t **);
++    if (atomic_load(&fail_all_unbinds) || atomic_exchange(&fail_next_unbind, 0)) {
++		atomic_fetch_add(&failed_unbinds, 1);
++		return SWITCH_STATUS_GENERR;
++	}
++	symbol = dlsym(RTLD_NEXT, "switch_event_unbind");
++	if (!symbol) return SWITCH_STATUS_GENERR;
++	memcpy(&next_unbind, &symbol, sizeof(next_unbind));
++	return next_unbind(node);
++}
++
++SWITCH_DECLARE(switch_status_t) switch_event_bind_removable(const char *id,
++	switch_event_types_t event, const char *subclass_name,
++	switch_event_callback_t callback, void *user_data, switch_event_node_t **node)
++{
++	void *symbol;
++	switch_status_t (*next_bind)(const char *, switch_event_types_t, const char *,
++		switch_event_callback_t, void *, switch_event_node_t **);
++	if (id && !strcmp(id, "AMQP") &&
++		atomic_fetch_add(&amqp_bind_calls, 1) + 1 == atomic_load(&fail_amqp_bind_at)) {
++		if (node) *node = NULL;
++		return SWITCH_STATUS_GENERR;
++	}
++	if (id && !strcmp(id, "AMQP")) {
++		amqp_callback = callback;
++		callback = amqp_acceptance_callback;
++	}
++	symbol = dlsym(RTLD_NEXT, "switch_event_bind_removable");
++	if (!symbol) return SWITCH_STATUS_GENERR;
++	memcpy(&next_bind, &symbol, sizeof(next_bind));
++	return next_bind(id, event, subclass_name, callback, user_data, node);
++}
+diff --git a/docs/mod_amqp/acceptance-artifacts/loader-fault-main.c b/docs/mod_amqp/acceptance-artifacts/loader-fault-main.c
+new file mode 100644
+index 0000000000..06a33fe33d
+--- /dev/null
++++ b/docs/mod_amqp/acceptance-artifacts/loader-fault-main.c
+@@ -0,0 +1,127 @@
++/* Isolated loader contract probe. Exit 0 means the permanent policy held.
++ * Core teardown is deliberately excluded until its permanent-module lifetime
++ * contract has a safe, tested implementation. */
++#include <switch.h>
++#include <dlfcn.h>
++#include <stdio.h>
++#include <string.h>
++
++static void *interposer_symbol(const char *name)
++{
++	void *symbol = dlsym(RTLD_DEFAULT, name);
++	if (!symbol) fprintf(stderr, "missing interposer symbol: %s\n", name);
++	return symbol;
++}
++
++static int api_reply(const char *command, const char *arg, char *reply, size_t size)
++{
++	switch_stream_handle_t stream = {0};
++	switch_status_t status;
++	SWITCH_STANDARD_STREAM(stream);
++	status = switch_api_execute(command, arg, NULL, &stream);
++	if (stream.data) switch_snprintf(reply, size, "%s", (char *)stream.data);
++	else reply[0] = '\0';
++	switch_safe_free(stream.data);
++	return (int)status;
++}
++
++int main(int argc, char **argv)
++{
++	const char *err = NULL;
++	const char *scenario = argc > 1 ? argv[1] : "normal";
++	void *symbol, *module_handle;
++	void (*fail_all_unbinds)(void), (*fail_amqp_bind_at)(int);
++	int (*failed_unbinds)(void), (*bind_calls)(void), (*deliveries)(void);
++	int bindings_before;
++	char status_text[512] = {0}, reload_text[512] = {0};
++	switch_status_t load_status, unload_status, force_status, repeat_status, exists_status;
++	int initial_clean = !strcmp(scenario, "initial-clean");
++	int initial_retained = !strcmp(scenario, "initial-retained");
++	int rc = 0;
++
++	if (strcmp(scenario, "normal") && !initial_clean && !initial_retained) return 2;
++	SWITCH_GLOBAL_dirs.mod_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT "/conf");
++	SWITCH_GLOBAL_dirs.conf_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT "/conf");
++	SWITCH_GLOBAL_dirs.log_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT);
++	SWITCH_GLOBAL_dirs.run_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT);
++	SWITCH_GLOBAL_dirs.db_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT);
++	SWITCH_GLOBAL_dirs.data_dir = strdup(AMQP_ACCEPTANCE_FIXTURE_ROOT);
++	switch_core_set_globals();
++	if (switch_core_init_and_modload(SCF_LOG_DISABLE, SWITCH_TRUE, &err) != SWITCH_STATUS_SUCCESS) return 10;
++	symbol = interposer_symbol("amqp_acceptance_fail_all_unbinds");
++	if (!symbol || sizeof(fail_all_unbinds) != sizeof(symbol)) return 12;
++	memcpy(&fail_all_unbinds, &symbol, sizeof(symbol));
++	symbol = interposer_symbol("amqp_acceptance_fail_amqp_bind_at");
++	if (!symbol || sizeof(fail_amqp_bind_at) != sizeof(symbol)) return 12;
++	memcpy(&fail_amqp_bind_at, &symbol, sizeof(symbol));
++	symbol = interposer_symbol("amqp_acceptance_failed_unbinds");
++	if (!symbol || sizeof(failed_unbinds) != sizeof(symbol)) return 12;
++	memcpy(&failed_unbinds, &symbol, sizeof(symbol));
++	symbol = interposer_symbol("amqp_acceptance_bind_calls");
++	if (!symbol || sizeof(bind_calls) != sizeof(symbol)) return 12;
++	memcpy(&bind_calls, &symbol, sizeof(symbol));
++	symbol = interposer_symbol("amqp_acceptance_deliveries");
++	if (!symbol || sizeof(deliveries) != sizeof(symbol)) return 12;
++	memcpy(&deliveries, &symbol, sizeof(symbol));
++	if (initial_clean || initial_retained) fail_amqp_bind_at(2);
++	if (initial_retained) fail_all_unbinds();
++
++	load_status = switch_loadable_module_load_module(AMQP_ACCEPTANCE_MODULE_DIR,
++		"mod_amqp", SWITCH_FALSE, &err);
++	exists_status = switch_loadable_module_exists("mod_amqp");
++	if (initial_clean) {
++		int absent = api_reply("amqp", "status", status_text, sizeof(status_text));
++		fail_amqp_bind_at(0);
++		repeat_status = switch_loadable_module_load_module(AMQP_ACCEPTANCE_MODULE_DIR,
++			"mod_amqp", SWITCH_FALSE, &err);
++		if (repeat_status == SWITCH_STATUS_SUCCESS)
++			api_reply("amqp", "status", reload_text, sizeof(reload_text));
++		printf("scenario=%s first_load=%d first_exists=%d api_absent=%d retry_load=%d retry_status=%s\n",
++			scenario, (int)load_status, (int)exists_status, absent, (int)repeat_status, reload_text);
++		return load_status != SWITCH_STATUS_SUCCESS && exists_status != SWITCH_STATUS_SUCCESS &&
++			absent != SWITCH_STATUS_SUCCESS && repeat_status == SWITCH_STATUS_SUCCESS &&
++			strstr(reload_text, "state=ACTIVE") ? 0 : 13;
++	}
++	if (load_status != SWITCH_STATUS_SUCCESS || exists_status != SWITCH_STATUS_SUCCESS) return 11;
++	module_handle = dlopen(AMQP_ACCEPTANCE_MODULE_DIR "/mod_amqp.so", RTLD_NOW | RTLD_NOLOAD);
++	if (!module_handle) return 14;
++	bindings_before = bind_calls();
++	if (api_reply("amqp", "status", status_text, sizeof(status_text)) != SWITCH_STATUS_SUCCESS) return 16;
++	unload_status = switch_loadable_module_unload_module(NULL, "mod_amqp", SWITCH_FALSE, &err);
++	force_status = switch_loadable_module_unload_module(NULL, "mod_amqp", SWITCH_TRUE, &err);
++	repeat_status = switch_loadable_module_load_module(AMQP_ACCEPTANCE_MODULE_DIR,
++		"mod_amqp", SWITCH_FALSE, &err);
++	if (switch_loadable_module_load_module("/usr/local/freeswitch/mod", "mod_commands",
++		SWITCH_FALSE, &err) == SWITCH_STATUS_SUCCESS) {
++		api_reply("reload", "mod_amqp", reload_text, sizeof(reload_text));
++	}
++	if (initial_retained) {
++		char reload_api[512] = {0};
++		api_reply("amqp", NULL, reload_api, sizeof(reload_api));
++		if (!strstr(reload_api, "-ERR mod_amqp configuration reload failed")) rc = 17;
++	}
++	{
++		switch_event_t *event = NULL;
++		if (switch_event_create(&event, SWITCH_EVENT_DTMF) != SWITCH_STATUS_SUCCESS) return 22;
++		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "AMQP-Harness", "true");
++		switch_event_deliver(&event);
++	}
++	printf("scenario=%s load=%d unload=%d force=%d repeat=%d exists=%d binds_before=%d binds_after=%d deliveries=%d failed_unbinds=%d dso_resident=%d status=%s reload=%s\n",
++		scenario, (int)load_status, (int)unload_status, (int)force_status, (int)repeat_status,
++		(int)switch_loadable_module_exists("mod_amqp"), bindings_before, bind_calls(), deliveries(), failed_unbinds(),
++		module_handle != NULL, status_text, reload_text);
++	if (unload_status != SWITCH_STATUS_NOUNLOAD || force_status != SWITCH_STATUS_NOUNLOAD ||
++		repeat_status == SWITCH_STATUS_SUCCESS || switch_loadable_module_exists("mod_amqp") != SWITCH_STATUS_SUCCESS ||
++		bind_calls() != bindings_before || deliveries() != 1 ||
++		!strstr(reload_text, "-ERR unloading module") || !strstr(reload_text, "-ERR loading module")) rc = 18;
++	if (initial_retained) {
++		if (!strstr(status_text, "state=RESTART_REQUIRED") || failed_unbinds() < 1) rc = 19;
++	} else if (!strstr(status_text, "state=ACTIVE") || failed_unbinds() != 0) rc = 20;
++	if (!initial_retained) {
++		char config_reload[512] = {0};
++		api_reply("amqp", NULL, config_reload, sizeof(config_reload));
++		if (!strstr(config_reload, "+OK mod_amqp configuration reloaded")) rc = 21;
++	}
++	dlclose(module_handle);
++	return rc;
++}
+diff --git a/docs/mod_amqp/acceptance-artifacts/unrelated-vscode-settings.patch b/docs/mod_amqp/acceptance-artifacts/unrelated-vscode-settings.patch
+new file mode 100644
+index 0000000000..85d0f62ba0
+--- /dev/null
++++ b/docs/mod_amqp/acceptance-artifacts/unrelated-vscode-settings.patch
+@@ -0,0 +1,13 @@
++diff --git a/.vscode/settings.json b/.vscode/settings.json
++index 78a59321a4..9aa8b4dd23 100644
++--- a/.vscode/settings.json
+++++ b/.vscode/settings.json
++@@ -1,5 +1,6 @@
++ {
++     "files.associations": {
++         "switch.h": "c"
++-    }
+++    },
+++    "cmake.sourceDirectory": "/root/freeswitch-devcontainer/freeswitch-develop/src"
++ }
++\ No newline at end of file
+diff --git a/docs/mod_amqp/filter-engine-acceptance.md b/docs/mod_amqp/filter-engine-acceptance.md
+new file mode 100644
+index 0000000000..876af34f4e
+--- /dev/null
++++ b/docs/mod_amqp/filter-engine-acceptance.md
+@@ -0,0 +1,346 @@
++# Обновление приёмки: 27 октября 2026 года
++
++**Вердикт остаётся BLOCKED.** Исторический аудит ниже зафиксировал F1/F2 до hardening. Текущий reviewable diff, результаты и ограничения описаны в [hardening-отчёте](filter-engine-hardening.md). Пользователь выбрал permanent-политику без изменения Core; новый бинарник не установлен.
++
++| Ранее выявленный пункт | Текущее состояние |
++| --- | --- |
++| F1, потеря Core registry/API при отказе module shutdown | Для динамических unload, forced unload и Core reload предотвращена: успешная загрузка возвращает NOUNLOAD, Core помечает модуль permanent до публикации; три изолированных loader-процесса прошли. Динамическое обновление бинарника запрещено. **Процессное завершение всё ещё блокирует приёмку:** Core пропускает permanent-модули, безопасного синхронного hook без изменения Core не найдено. |
++| F2, data race command/logging running | Исправлена mutex-синхронизацией; 37 integration cases и TSan прошли, включая контролируемые worker-loop сценарии. Реальные сетевые таймауты и полное закрытие процесса не доказаны. |
++| Health/initial load | status доступен через api amqp status. ACTIVE, DEGRADED, RESTART_REQUIRED различаются. При retained initial failure Core может сообщить успешную загрузку; проверять нужно status. |
++| Sanitizer | Engine ASan/UBSan/LSan и TSan зелёные; integration TSan зелёный, integration ASan/UBSan/LSan падает в interceptor sigaltstack при APR thread exit. Минимальный Core/APR контрольный процесс ошибку не воспроизвёл; причина открыта. |
++
++Ниже сохранён исходный аудит как baseline до этих изменений; его матрица и формулировки F1/F2 относятся к проверенному тогда HEAD, а не к нынешнему рабочему diff. Для текущих исходников используйте [hardening-отчёт](filter-engine-hardening.md), [loader logs](hardening-artifacts/loader-normal-v3.log) и [sanitizer summary](hardening-artifacts/sanitizer-policy-v2-run.log).
++
++---
++
++# mod_amqp Filter Engine v1: независимая окончательная проверка
++
++Дата: 27 октября 2026 года. **Вердикт: BLOCKED.** Контракт фильтрации и штатное
++переключение producer-набора подтверждены исходниками, повторными тестами и
++прежней runtime-проверкой. Безопасный lifecycle *всего интегрированного модуля*
++пока принять нельзя: аварийный `NOUNLOAD` в используемом Core оставляет модуль
++в памяти, но теряет его запись в реестре, а command/logging workers читают флаг
++остановки без синхронизации. Ни один из этих путей не закрыт имеющимися тестами.
++Потеря события при отключении RabbitMQ относится к прежнему транспорту и в
++этот вердикт не включена.
++
++## Ревизия и граница проверки
++
++- Ветка: `codex/mod-amqp-filter-engine-stage3`; проверенный HEAD:
++  `7d8d9e948b6761a8ec8a8672009d9051cf27cb8a`.
++- Baseline этапа 2: `7d20cfbdb75bf62756a8d835c106f0c569bd048f`.
++  Этап 3: `7dc0a00e84a1be2db5d999b2b5b556eae819d174`. Исправление ответа API:
++  HEAD `7d8d9e948b6761a8ec8a8672009d9051cf27cb8a`.
++- На входе в аудит tracked-файлы были чистыми. В рабочем дереве уже были
++  неотслеживаемые IDE/build-каталоги, сторонние модули, тестовые бинарники и
++  приватный тестовый артефакт. Их содержимое не изменялось и в отчёт не
++  включено. Мною созданы только этот отчёт и проверочные артефакты в
++  [`acceptance-artifacts/`](acceptance-artifacts/). Для production-каталога
++  `src/mod/event_handlers/mod_amqp` unstaged и staged patch пусты; SHA-256
++  пустого patch: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
++- Во время аудита появился посторонний tracked diff в `.vscode/settings.json`
++  (добавлен `cmake.sourceDirectory`). Он сохранён без изменений отдельно как
++  [`unrelated-vscode-settings.patch`](acceptance-artifacts/unrelated-vscode-settings.patch),
++  SHA-256 `5dfdc7306e367aebbcb45273f74a6dda1f4f92e447b7ce09254aea8689102c21`.
++  Этот diff не входит в проверяемый код `mod_amqp`; commit не создан.
++- Применимых `AGENTS.md` в родительских каталогах, `docs/mod_amqp`, каталоге
++  модуля и тестов не найдено. Предыдущие
++  [архитектурный обзор](filter-engine-review.md),
++  [этап 1](producer-lifecycle-stage1.md),
++  [этап 2](filter-engine-stage2.md),
++  [этап 3](filter-engine-stage3.md),
++  [runtime](filter-engine-stage3-runtime.md) и
++  [API-ответ](filter-engine-stage3-api-reply.md) использованы как проверяемые
++  утверждения; код и тесты просмотрены независимо.
++
++Проверялся исходный код репозитория и изолированные процессы в контейнере
++`freeswitch-dev`. Установленный Core имеет SHA-256
++`85774d8dc221b300d12e342ccacf76ce397946bf2044d77cb7f2d232a72a2145`;
++Core sources event/log/hash/loader между его ревизией `82bf16a286` и HEAD не
++отличаются. Установленный `mod_amqp.so` до и после этой проверки имеет SHA-256
++`31b8dba5b522808a1bc95f07ccde8b332eaca9e4d2432899ec9d48bfbc583d1f`.
++Он был установлен по прежнему отдельному разрешению; **в этом аудите установка,
++reload/unload, рабочий XML и RabbitMQ не затрагивались**.
++
++## Матрица требований
++
++`PASS` означает подтверждение указанным методом; это не утверждение об
++отсутствии всех отказов ОС или сетевых ошибок.
++
++| Гарантия | Статус | Основание и граница |
++| --- | --- | --- |
++| Нет `<filter>` → legacy; неизвестный mode отклоняется | PASS | [`mod_amqp_producer_prepare()`](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L245), integration/ESL cases |
++| Legacy defaults, parsing `event_filter`, `^subclass` и кратность bindings | PASS | [producer:278–384](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L278), lifecycle/integration cases; перекрывающиеся legacy-подписки намеренно вызывают callback несколько раз |
++| Rules: whitelist, OR правил/селекторов, AND условий | PASS | [parser](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_parser.c#L57), [matcher](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_matcher.c#L26), 19 engine cases |
++| Ноль правил → ноль bindings и сообщений | PASS | [compiler:135–144](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_compiler.c#L135), [producer:411–421](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L411), integration |
++| Канонические `event_id`/subclass, обычные и повторные headers/arrays | PASS | [parser:43–54](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_parser.c#L43), [matcher:3–24](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_matcher.c#L3), Core [`switch_event_get_header_idx()`](../../src/switch_event.c#L846); чтение event предполагает отсутствие одновременной мутации вызывающим кодом |
++| План подписок без пересечения ALL и конкретных IDs | PASS | [compiler:135–144](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_compiler.c#L135), [Core delivery](../../src/switch_event.c#L400), integration cases |
++| Одно выполнение на одну Core delivery rules-профилю | PASS | Один уникальный binding/ALL на профиль и boolean matcher: [activate](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L459), [matcher](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_matcher.c#L39); это не гарантия RabbitMQ exactly-once |
++| Отказ matcher до allocation, JSON и enqueue | PASS | [callback:87–123](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L87), integration counters |
++| Engine переживает XML/DTO и освобождается после unbind/join | PASS для producer | [compiler copies](../../src/mod/event_handlers/mod_amqp/mod_amqp_filter_compiler.c#L90), [prepared destroy](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L445), [producer destroy](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L137); ошибка unbind/join удерживает engine |
++| Prepare всего набора до teardown без runtime-ресурсов и смены hash | PASS | [prepare set](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L128), [do_config](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L175), [connection parse](../../src/mod/event_handlers/mod_amqp/mod_amqp_connection.c#L195); отрицательные тесты |
++| Дубликаты имён до teardown; readiness перед первым binding | PASS | [prepare set](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L128), [activate:459–530](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L459) |
++| Все старые bindings сняты до новых; failed activation очищает новый набор | PASS | [do_config:189–200](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L189), integration fault injection |
++| Retained profile доступен для повторной очистки внутри модуля | PASS с оговоркой | В hash он остаётся при unbind/join failure; после аварийного Core unload **повторный вызов через loader недоступен** (F1) |
++| Безопасная аварийная выгрузка DSO/pool и повторный teardown через Core | **FAIL** | F1: Core удаляет registry entry и всё равно возвращает успешный unload при `NOUNLOAD`; воспроизведено отдельным loader-probe |
++| Остановка producer/command/logging workers без гонок | **FAIL** | Producer синхронизирован; command/logging `running` имеет data race (F2) |
++| API/ESL выдаёт точный `+OK`/`-ERR` | PASS | [API handler](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L47), [Core API](../../src/switch_loadable_module.c#L2933), [ESL](../../src/mod/event_handlers/mod_event_socket/mod_event_socket.c#L1555), 5 isolated ESL cases |
++| Аварийный unbind в настоящем Core loader | **FAIL** | Отдельный процесс с отказом воспроизвёл F1; остальные OS/I/O failures не проверены |
++| Реальный network-worker shutdown под TSan | NOT VERIFIED | Integration заменяет workers на idle; требуется отдельный I/O harness после F2 |
++
++## Findings и последствия
++
++### F1 — P0, блокирует приёмку: `NOUNLOAD` не сохраняет повторяемый unload
++
++**Сценарий.** В штатном `reload mod_amqp` Core сначала удаляет модуль из
++`module_hash`, затем вызывает `do_shutdown()`:
++[`switch_loadable_module_unload_module():1898–1913`](../../src/switch_loadable_module.c#L1898).
++Если [`mod_amqp_shutdown():120–151`](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L120)
++не смог снять binding или присоединить поток, он возвращает
++`SWITCH_STATUS_NOUNLOAD`, сохраняя ресурсы. Core записывает этот статус в
++`module->status`; DSO и module pool тогда не освобождаются, но
++[`do_shutdown():2349–2382`](../../src/switch_loadable_module.c#L2349)
++**безусловно возвращает `SWITCH_STATUS_SUCCESS`**. Внешний unload поэтому не
++восстанавливает entry; повторный unload не найдёт модуль. При этом
++[`mod_amqp_shutdown():116`](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L116)
++уже установил `shutting_down`, а [`mod_amqp_do_config():184`](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L184)
++отвергает reload. Retained callbacks/workers могут оставаться живыми, но
++штатного пути их очистки через loader уже нет. Поскольку hash entry удалена,
++попытка новой загрузки тем же именем не будет отклонена на уровне registry;
++[`mod_amqp_load():69`](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L69)
++сбросит process-global состояние, если код DSO ещё загружен. Безопасность
++такого повторного load не доказана и полагаться на него нельзя.
++
++**Самостоятельное воспроизведение.** Тестовый
++[`loader-fault-main.c`](acceptance-artifacts/loader-fault-main.c) загрузил
++настоящий build-tree `mod_amqp.so` в отдельный Core-процесс с приватным
++[`freeswitch.xml`](acceptance-artifacts/loader-fault-freeswitch.xml) без
++соединений. [`LD_PRELOAD` interposer](acceptance-artifacts/loader-fault-interposer.c)
++отказал ровно одному `switch_event_unbind()`. Результат, exit 0:
++`scenario=unload initial_load=0 failed_unbinds=1 unload_return=0
++exists_after_unload=1`. Числовой `1` у `switch_loadable_module_exists()`
++означает FALSE: Core сообщил об успешном unload, но registry entry исчезла
++после неуспешного cleanup. Тест не запускает второй load поверх retained
++ресурсов, чтобы не рисковать искусственным UAF даже в изолированном процессе.
++
++При **ошибке первоначальной загрузки** модуль вызывает shutdown самостоятельно:
++[`mod_amqp_load():82–89`](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L82).
++Если очистка снова не удалась, он возвращает `NOUNLOAD`; Core принимает этот
++статус как успешную загрузку и помечает module `perm`:
++[`switch_loadable_module_load_file():1720–1739`](../../src/switch_loadable_module.c#L1720).
++DSO и pool сохраняются, но `shutting_down` уже установлен, штатный API reload
++отклоняется, а обычный unload permanent-модуля запрещён. Это отдельная
++недоказанная recovery-гарантия, не подтверждаемая нормальной загрузкой.
++Второй отдельный процесс инъецировал отказ второго AMQP binding и постоянный
++отказ unbind. Результат, exit 0:
++`scenario=initial initial_load=0 failed_unbinds=3 unload_return=16
++exists_after_unload=0`: Core принял initial `NOUNLOAD` как загрузку, а
++последующий unload вернул код 16 (`SWITCH_STATUS_NOUNLOAD`); `exists=0`
++означает, что permanent-модуль остался зарегистрирован. Оба процесса
++завершились без вызова teardown намеренно удержанных ресурсов; ОС освободила
++их при выходе. Действующий процесс FreeSWITCH не использовался.
++
++**Происхождение.** Поведение Core предшествует этапу 3, а возврат `NOUNLOAD`
++из модуля уже присутствовал в baseline этапа 2. Этап 3 расширил число
++аварийных путей command/logging и заявил удержание ресурсов, но не решил
++возврат управления через Core. Это не новая строка-регрессия в Core, однако
++текущая интеграция не выполняет требование повторяемого безопасного teardown.
++Обычный успешный unload/load и тест прямого вызова `mod_amqp_shutdown()` этот
++сценарий не проверяют.
++
++**Решение.** Не освобождать ресурсы живых callbacks/workers и не менять Core в
++рамках текущего аудита. В отдельной задаче выбрать проверяемую политику:
++исправить Core loader так, чтобы failed shutdown сохранял registry entry и
++интерфейсы для повторной очистки, **либо** сделать модуль постоянно
++невыгружаемым и выполнять только config reload с restart процесса после
++неустранимого отказа. Второй вариант лишит операторов штатного `reload
++mod_amqp`, поэтому требует явного продуктового решения. Для выбранного пути
++проверить failed initial load, failed unload, повторную операцию и запрет
++опасного повторного load в отдельном процессе. Пока F1 открыт, аварийный
++shutdown требует управляемого restart процесса.
++
++### F2 — P0, блокирует приёмку: data race флагов command/logging
++
++[`mod_amqp_command_destroy():55`](../../src/mod/event_handlers/mod_amqp/mod_amqp_command.c#L55)
++пишет `running=0`, а реальный worker читает его в
++[`mod_amqp_command_thread():292,398,516`](../../src/mod/event_handlers/mod_amqp/mod_amqp_command.c#L292)
++без mutex/atomic. Аналогично
++[`mod_amqp_logging_destroy():127`](../../src/mod/event_handlers/mod_amqp/mod_amqp_logging.c#L127)
++и [`mod_amqp_logging_thread():331`](../../src/mod/event_handlers/mod_amqp/mod_amqp_logging.c#L331).
++Между записью и чтением нет happens-before до `join`; сам `join` ожидает выход
++worker и не синхронизирует *сигнал* остановки. По модели памяти C это data race:
++worker не обязан увидеть stop, значит teardown/reload может зависнуть и
++оставить lifecycle mutex удержанным. Даже если конкретная сборка обычно
++перечитывает поле из-за внешних вызовов, гарантия отсутствует.
++
++**Происхождение.** Обычные unsynchronized чтения/записи существовали до этапа 3;
++этап 3 изменил порядок публикации и проверку `join`, но флаги не исправил.
++Это прежний дефект, влияющий на безопасность общего lifecycle. Тестовый
++[`integration_other_thread()`](../../src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h#L68)
++заменяет оба workers на `integration_idle`, поэтому успешный TSan не покрывает
++эти чтения. Producer в отличие от них защищает `running` и breaker через
++[`state_mutex`](../../src/mod/event_handlers/mod_amqp/mod_amqp_producer.c#L48).
++
++**Решение.** В отдельной задаче синхронизировать stop/read в command и logging,
++не удерживать mutex при AMQP I/O и `join`, ограничить ожидания сетевых операций;
++добавить TSan-harness с настоящими worker loops и отказами/задержками I/O.
++
++### F3 — P1, тестовая граница: network workers и прочие аварийные пути не покрыты
++
++Текущие 18 lifecycle cases используют настоящий Core event engine и unbind,
++но заменяют sender на joinable test worker:
++[`test_producer_lifecycle.c:1–6,44–53`](../../src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c#L1).
++Integration включает production sources, настоящий Core JSON/queues/logger и
++реальный `mod_event_socket`, но подменяет snapshot XML, доставку помеченных
++events и сетевые workers:
++[`test_producer_lifecycle.c:64–84`](../../src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c#L64),
++[`producer_integration_helpers.h:12–85`](../../src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h#L12).
++Пять API cases проходят фактический ESL path через тестовый proxy DSO, который
++делегирует production `amqp_reload()`:
++[`api_reply_cases.h`](../../src/mod/event_handlers/mod_amqp/test/api_reply_cases.h#L1),
++[`api_reply_proxy.c:16–26`](../../src/mod/event_handlers/mod_amqp/test/api_reply_proxy.c#L16).
++Это адекватно для контрактов фильтрации и текста API, но не доказывает F2 и
++реальные AMQP timeouts. Отдельный loader fixture выше теперь подтверждает два
++конкретных пути F1, но не моделирует остальные OS/DSO/pool failures.
++В прошлой [runtime-проверке](filter-engine-stage3-runtime.md) были штатный
++unload/load, сохранение старого набора при неверном mode, звонок с двумя ногами
++и реальные публикации; аварийные loader-пути там не вызывались.
++
++**Решение.** Расширить приложенный временный loader fixture на отказ join,
++проверку доступности API после `shutting_down`, повторный unload/load только
++после безопасного исправления F1 и наблюдение pool/DSO references. Другой
++fixture должен исполнять настоящие command/logging loops с mock AMQP I/O и
++TSan. Эти инъекции нельзя запускать в действующем сервисе.
++
++## Внесённые изменения и прежние ограничения
++
++В diff этапа 3 и API-фикса не обнаружено новой подтверждённой регрессии
++семантики rules/legacy на покрытых сценариях. Этап 3 **намеренно изменил**
++обработку producer connection без имени: теперь
++[`mod_amqp_connection_parse():204–211`](../../src/mod/event_handlers/mod_amqp/mod_amqp_connection.c#L204)
++отклоняет подготовку всего набора, тогда как прежний create мог пропустить
++эту connection. Это совместимость конфигурации, которую следует учитывать при
++развёртывании. API-фикс изменил интерпретацию `switch_status_t`: обработчик
++[`amqp_reload()`](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L47)
++возвращает `SUCCESS` и при отрицательном результате операции, чтобы ESL
++сохранил `-ERR` из stream. Клиенты, прежде читавшие только status прямого
++`switch_api_execute()`, должны читать тело ответа. Пять ESL cases это
++проверяют; иных изменений transport или правил переключения API-фикс не внёс.
++
++F1 относится к существовавшему до этапа 3 сочетанию возврата `NOUNLOAD` и
++контракта Core loader; F2 — к существовавшим unsynchronized command/logging
++workers. После этапа 3 оба пути по-прежнему влияют на безопасность общего
++reload/shutdown и поэтому блокируют **текущую** приёмку, даже при отсутствии
++новой строки-регрессии. Прежними, принятыми ограничениями остаются legacy
++дубликаты, отсутствие rollback после начала teardown, окно без subscriptions,
++потеря остатков очередей, отсутствие подтверждённой доставки RabbitMQ и
++неограниченное ожидание чужих Core callbacks/сетевого I/O. Последняя пара
++важна для эксплуатационной диагностики, но publisher confirms и transport
++retry не включены в условия приёмки этого Filter Engine.
++
++## Подтверждённый штатный путь и оставшиеся ограничения
++
++Подготовка нового набора заканчивается до изменения старого:
++[`amqp_prepare_set()`](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L128)
++идёт до [`amqp_destroy_producers()`](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L155).
++`mod_amqp_producer_prepare()` создаёт собственный pool, копии параметров и
++соединений, компилирует engine; runtime connection/queue/thread/binding/hash
++появляются только в `mod_amqp_producer_activate()`. Ошибка подготовки, включая
++дубликат имени, оставляет старый набор. Перед первым новым binding сняты все
++старые; ошибка поздней активации пытается убрать весь новый набор.
++
++Unbind producer-биндинга является настоящим барьером текущих callbacks:
++[`switch_event_deliver():405–419`](../../src/switch_event.c#L405) держит Core
++RWLOCK на время вызова, а [`switch_event_unbind():2186–2201`](../../src/switch_event.c#L2186)
++берёт write lock. `mod_amqp_producer_destroy()` сначала снимает свои nodes,
++затем выставляет stop под `state_mutex`, присоединяет sender и только после
++этого освобождает engine/pool. При failed unbind/join успешно освобождённые
++handles обнуляются, profile удерживается в собственном hash; запись удаляется
++только при совпадении указателя владельца. Обход hash при частичном unwind
++продвигает iterator перед удалением current entry; реализация
++[`switch_hashtable_next()`](../../src/switch_hashtable.c#L283) и
++[`switch_hashtable_remove()`](../../src/switch_hashtable.c#L156) допускает это
++без чтения удалённой entry. `lifecycle_mutex` не берут producer callback/sender;
++управляющий `trylock` и проверка command worker избегают очевидного self-join.
++
++Принятые ограничения штатного переключения: после начала teardown нет rollback,
++есть окно без subscriptions и удаляются остатки старых очередей. При отказе
++поздней активации уже активированная часть нового набора могла обработать
++события. Legacy допускает повторные callback из пересекающихся bindings.
++Command/logging не переключаются транзакционно с producer-набором. Успешный
++unbind может ждать чужие callbacks Core; настоящий sender может задержать
++`join` на сетевом I/O. Все обращения producer к
++`circuit_breaker_reset_time` в callback защищены `state_mutex`; он не
++удерживается через JSON/enqueue/I/O/unbind/join.
++
++## Выполненные проверки и воспроизводимость
++
++После фиксации HEAD обнаружено, что старые `make check` журналы записаны в
++10:57, а `mod_amqp.c` менялся в 11:01. Поэтому результаты 19/18/29 из прежнего
++[API-отчёта](filter-engine-stage3-api-reply.md) использованы лишь как фон.
++Самостоятельно повторены тесты текущего HEAD. Обычный `make check` не пересобрал
++integration executable: тот включает `mod_amqp.c` через другой исходник, не
++отражённый в dependency graph. Второй прогон с `make -W
++test/test_producer_integration.c` принудительно перекомпилировал этот executable.
++Эта особенность сборки тестов требует сохранения при будущих проверках.
++
++| Команда/проверка в `freeswitch-dev` | Exit code и результат |
++| --- | --- |
++| `make -j2 mod_amqp.la check` с overrides ниже | 0; 3 executables PASS |
++| `make -j2 -W test/test_producer_integration.c test/test_producer_integration check` с теми же overrides | 0; 19/19 engine, 18/18 lifecycle, 29/29 integration (включая 5 ESL) |
++| `make -j2 -W mod_amqp.c mod_amqp.la` с правильным Core | 0; production C перекомпилирован, module relinked с `-Werror` |
++| `MOD_AMQP_SANITIZER_TEST=test_producer_integration sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-acceptance-sanitizers/integration /usr/local/freeswitch/lib` | 0; ASan+UBSan+LSan 29/29, TSan 29/29 |
++| `MOD_AMQP_SANITIZER_TEST=test_filter_engine sh test/run_filter_engine_sanitizers.sh /tmp/mod-amqp-acceptance-sanitizers/engine /usr/local/freeswitch/lib` | 0; ASan+UBSan+LSan 19/19, TSan 19/19 |
++| `readelf -d`/`ldd` build-tree module/tests | 0; `libfreeswitch.so.1` из `/usr/local/freeswitch/lib`, `librabbitmq.so.4`, RUNPATH установленного Core |
++| Два отдельных Core loader fault probes (`timeout 35s`, `LD_PRELOAD`) | 0/0; failed unload и failed initial load воспроизвели F1, подробности выше |
++| `git diff --check` | 0 |
++
++Точные overrides для module build: `mod_amqp_la_LIBADD="-L/usr/local/freeswitch/lib
++-lfreeswitch"` и `mod_amqp_la_LDFLAGS="-avoid-version -module
++-no-undefined -shared -lrabbitmq -Wl,-z,defs
++-Wl,-rpath,/usr/local/freeswitch/lib"`; для engine/lifecycle tests — явные
++`*_LDADD` к `/usr/local/freeswitch/lib/libfreeswitch.so`, для lifecycle также
++`-lrabbitmq`, и `*_LDFLAGS` с `-no-undefined`/RUNPATH. Integration наследует
++lifecycle flags. Их необходимость вызвана оставшимся в build tree другим Core
++(`.libs/libfreeswitch.so.1.0.0`, SHA-256
++`1e7f38c63165b17eea20e686de57f226c38c825e5541bb5c18f9e6a83275c035`);
++обычный `libfreeswitch.la` не является доказательством линковки с установленным
++Core. Generated Makefile содержит `SWITCH_AM_CFLAGS` с `-Werror`, `-Wall`, C99.
++Headers и изученные Core sources соответствуют установленной ревизии. После
++relink SHA-256 build-tree и установленного module одинаковый, но новый бинарник
++**не устанавливался** в рамках аудита.
++
++Sanitizer runner инструментирует production C, включённые в fixture, parser,
++compiler, matcher, test proxy и клиент; установленный `libfreeswitch`,
++`mod_event_socket` и rabbitmq-c не инструментированы. Integration запускает
++полный event engine, standalone engine — minimal Core. Успешный TSan означает
++отсутствие репортов только в исполненных путях; F2 worker loops тест заменяет.
++Первый локальный вне контейнера запуск test executable завершился exit 127
++(`libtpl.so.0` недоступна); его результат не засчитан. Достоверные повторы
++выполнены в `freeswitch-dev`, где зависимости доступны.
++
++Полные журналы этих повторов, `.trs`, sanitizer outputs, stdout сборки,
++исходники временного loader harness, его два результата и контрольные SHA-256
++сохранены в
++[`docs/mod_amqp/acceptance-artifacts/`](acceptance-artifacts/), то есть в volume
++репозитория вне контейнерного `/tmp`. Перед копированием проверены на строки
++`password`, `token`, `authorization`, `credential`, `secret`, URI с credentials;
++совпадений не найдено. Приватный test token и рабочий XML не копировались.
++
++## Что требуется для снятия блокировки
++
++1. Согласовать модульное поведение failed unload/initial load с фактическим
++   loader-контрактом Core: живые callback/worker не должны потерять достижимого
++   владельца, повторная загрузка поверх retained globals должна быть исключена.
++   Проверить это fault injection в отдельном процессе; не менять Core без
++   отдельного решения.
++2. Убрать data races stop-флагов command/logging и проверить настоящий worker
++   shutdown/timeout под TSan и контролируемым mock AMQP I/O.
++3. После исправлений повторить `-Werror` build, 19/18/29 cases, sanitizers,
++   failed initial load, failed unload/retry и штатный reload. Для будущего
++   `make check` явно форсировать integration rebuild при изменении включаемых
++   production `.c` либо исправить тестовые dependencies.
++
++До закрытия F1 и F2 принять Filter Engine как безопасный lifecycle-модуль
++нельзя. Поведение фильтрации v1 в штатном сценарии подтверждено; действующий
++сервис во время этой проверки не изменялся.
+diff --git a/docs/mod_amqp/filter-engine-hardening.md b/docs/mod_amqp/filter-engine-hardening.md
+new file mode 100644
+index 0000000000..2b1dea3c29
+--- /dev/null
++++ b/docs/mod_amqp/filter-engine-hardening.md
+@@ -0,0 +1,46 @@
++# mod_amqp Filter Engine v1 — hardening и политика permanent
++
++Дата: 27 октября 2026 года. Ветка codex/mod-amqp-filter-engine-stage3, HEAD 7d8d9e948b6761a8ec8a8672009d9051cf27cb8a. Изменения не закоммичены. На входе в продолжение уже существовали tracked diff предыдущих шагов (Makefile.am, command/logging, тесты) и неотслеживаемые IDE/build/посторонние файлы; они сохранены. Применимых AGENTS.md не найдено. Работа выполнена в исходном дереве, проверки — в отдельных процессах контейнера freeswitch-dev. Действующий сервис, его XML, RabbitMQ и установленный модуль не изменялись.
++
++**Текущий статус: BLOCKED для production-приёмки.** Вариант B выбран пользователем и реализован для динамического loader и наблюдения состояния, но безопасное завершение всего процесса без изменения Core не доказано. Integration ASan также остаётся красным. Это промежуточная реализация, не разрешение на установку.
++
++## Что изменено
++
++- [mod_amqp.c](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L47), [mod_amqp.h](../../src/mod/event_handlers/mod_amqp/mod_amqp.h#L213): синхронизированное состояние ACTIVE, DEGRADED, RESTART_REQUIRED с константной диагностикой без credentials. Команда api amqp status выдаёт состояние и restart_required; api amqp без аргумента по-прежнему выполняет конфигурационный reload и возвращает прежние +OK/-ERR. Получение status не ждёт lifecycle mutex.
++- [mod_amqp_load()](../../src/mod/event_handlers/mod_amqp/mod_amqp.c#L100): успешная первичная активация возвращает SWITCH_STATUS_NOUNLOAD. Core [load_file](../../src/switch_loadable_module.c#L1720) устанавливает permanent до публикации интерфейсов. Повторный прямой вызов load проверяет сохранённый pool до memset. Обычный и forced unload в [Core](../../src/switch_loadable_module.c#L1889) отклоняются до удаления registry/interfaces и до shutdown; Core reload mod_amqp поэтому также отклоняется. Изменение бинарника требует перезапуска процесса FreeSWITCH, а не module reload.
++- При ошибке initial load с полной успешной очисткой load возвращает GENERR, и последующая загрузка возможна. При retained resource load возвращает NOUNLOAD, сохраняет DSO/pool и API status показывает RESTART_REQUIRED; api amqp отвергается. Это ограничение Core: module_exists может быть успешным при неработоспособном модуле. Поэтому мониторинг должен читать api amqp status, а не только module_exists.
++- [mod_amqp_do_config()](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c#L175): ошибка подготовки до teardown сохраняет прежнее состояние и набор, меняет только диагностический detail. Ошибка после начала переключения помечает DEGRADED; повторный config reload разрешён и успешный переход возвращает ACTIVE. Для RESTART_REQUIRED после initial retained shutdown-флаг запрещает config reload, status доступен. Подготовка набора до teardown, удаление старых bindings до новых, retained owners, транспорт, rules/legacy, JSON и routing не изменены.
++- [Makefile.am](../../src/mod/event_handlers/mod_amqp/Makefile.am#L13): явные зависимости объектов модуля от mod_amqp.h и тестовых translation units от включённых production исходников/helpers. Проверка выявила реальную опасность: dummy .Plo оставил старый producer object после изменения layout globals; первый loader probe упал в switch_hashtable_search. После добавления prerequisite все production objects пересобраны, probe проходит. [Проверка зависимостей](hardening-artifacts/check-deps.sh) доказала шесть recompiles/relinks и стабильный no-op, сохранив SHA исходников и mtime.
++- Сохранены исправления предыдущих шагов: синхронизация command/logging running и thread identity в [command](../../src/mod/event_handlers/mod_amqp/mod_amqp_command.c), [logging](../../src/mod/event_handlers/mod_amqp/mod_amqp_logging.c), [utils](../../src/mod/event_handlers/mod_amqp/mod_amqp_utils.c); worker-loop cases и исправление sanitizer proxy build. Новые [ESL-кейсы](../../src/mod/event_handlers/mod_amqp/test/api_reply_cases.h) проверяют ACTIVE после ошибки подготовки, DEGRADED с восстановлением, RESTART_REQUIRED с запретом config reload.
++
++## Изолированные loader-процессы
++
++[Harness](acceptance-artifacts/loader-fault-main.c) и [interposer](acceptance-artifacts/loader-fault-interposer.c) запускаются с отдельным Core и fault injection; exit 0 означает выполнение проверяемого контракта. Все три запуска завершились с кодом 0:
++
++| Сценарий | Наблюдение |
++| --- | --- |
++| [normal](hardening-artifacts/loader-normal-v3.log) | load=0, unload=16, force=16, repeat load=1; registry, API, DSO и два bindings остались. Core reload вернул ошибки unload/load. Тестовое событие доставлено callback ровно один раз; status ACTIVE. Config reload дал +OK. |
++| [initial-clean](hardening-artifacts/loader-initial-clean-v3.log) | первый load=9, registry/API отсутствуют; после снятия fault повторный load=0 и status ACTIVE. |
++| [initial-retained](hardening-artifacts/loader-initial-retained-v3.log) | Core считает load успешным (0), status RESTART_REQUIRED; unload/force запрещены, duplicate load отклонён, два bindings сохранены, test callback доставлен, config reload дал -ERR. Три fault-injected unbind остались неуспешными. |
++
++Проверки registry/API/bindings/DSO не равны полному доказательству состояния всех globals или workers: внутренний symbol mod_amqp_globals не экспортируется; worker-liveness в этих loader probes напрямую не измеряется. Отдельные integration worker cases проверяют join/retained owner с контролируемым I/O, но не весь Core shutdown и не реальные сетевые deadlines.
++
++## Блокер завершения процесса
++
++[Core switch_core_destroy()](../../src/switch_core.c#L3019) посылает SWITCH_EVENT_SHUTDOWN перед module teardown, затем вызывает switch_loadable_module_shutdown(), event shutdown и остановку pools. Однако [switch_event_fire_detailed()](../../src/switch_event.c#L2006) только ставит событие в очередь/dispatch pool и не ждёт его доставки. [Core module shutdown](../../src/switch_loadable_module.c#L2410) пропускает permanent-модули. [switch_event_deliver()](../../src/switch_event.c#L400) держит read RWLOCK во время callback, а [switch_event_unbind()](../../src/switch_event.c#L2175) берёт write RWLOCK: прямой teardown из shutdown callback создаёт read-to-write deadlock. Перенос teardown в отдельный поток не создаёт барьера перед уничтожением event engine и pools; для callback возможны гонки и use-after-free. SWITCH_EVENT_SHUTDOWN_REQUESTED ещё раньше, асинхронно и может не соответствовать фактическому завершению; atexit уже слишком поздно. Поддерживаемого синхронного pre-Core-teardown hook без изменения Core в этой версии не найдено.
++
++Поэтому участок process shutdown сознательно **не реализован**. Не выполнен требуемый probe завершения отдельного Core-процесса с реальными workers и контролируемым I/O: проверять его до появления корректного механизма было бы ложной приёмкой. Обязательная зависимость для завершения варианта B — поддерживаемая синхронная точка shutdown до event/pool teardown либо пересмотр запрета на узкое изменение Core loader/lifecycle. Операционный pre-stop вне Core мог бы уменьшить риск штатного обслуживания, но не гарантирует безопасность всех путей завершения и не закрывает требование.
++
++## Проверки
++
++Сборка с -Werror использовала установленную согласованную /usr/local/freeswitch/lib/libfreeswitch.so, без install. Точные [команды и overrides](hardening-artifacts/commands.md) и [журнал проверки](hardening-artifacts/check-permanent-v2.log) сохранены; make mod_amqp.la check завершился 0. Три test executable дали 19/19 engine, 18/18 lifecycle, 37/37 integration (включая три новые ESL status проверки и пять worker-loop cases). [Проверка dependencies](hardening-artifacts/dependency-permanent-summary.log) — exit 0, шесть пересборок по входам и отсутствие сборки без изменений. Три loader scenarios выше — exit 0 каждый. git diff --check — exit 0.
++
++[Engine sanitizer](hardening-artifacts/sanitizer-engine-policy-final-summary.log): ASan+UBSan+LSan 19/19 и TSan 19/19, exit 0. [Integration sanitizer](hardening-artifacts/sanitizer-policy-v2-run.log): TSan 37/37, exit 0; ASan+UBSan+LSan exit 1 с [stack-buffer-underflow](hardening-artifacts/sanitizers-policy-v2/test_producer_integration_address,undefined.log) в __interceptor_sigaltstack / AsanThread::Destroy при завершении APR-потока. Этот результат повторён после финального изменения fixture. Сбой полного набора возник во время старого кейса invalid_connection_preparation_preserves_old_set, до новых worker-loop cases. Изолированный кейс без запуска worker [прошёл](hardening-artifacts/asan-worker-mutex-filtered.log), четыре отдельных worker-loop кейса упали в том же ASan interceptor (три underflow, один overflow); увеличение стека тестового destroyer не помогло и было отменено. Во всех успешных путях новых worker cases join проверяется, но это не исключает ошибку lifetime в fixture или Core. Проверки не ослаблялись. Создан [минимальный Core/APR reproducer](hardening-artifacts/asan-core-apr-repro.c) без mod_amqp; успешные прогоны с Core и с загруженными тестовым proxy/DSO не воспроизвели ошибку ([без DSO](hardening-artifacts/asan-core-apr-cond-debug.log), [с DSO](hardening-artifacts/asan-core-apr-cond-dso-debug.log)). Это **не** доказывает внешний дефект: причина integration-сбоя пока неизвестна, и ASan-покрытие изменённых worker/lifecycle путей не засчитано. TSan не инструментировал libfreeswitch и librabbitmq. Controlled-I/O worker tests не доказывают сетевой предел ожидания в librabbitmq/TCP.
++
++Проверены ранее зафиксированные legacy/rules, JSON, routing и транспорт через неизменённые engine/lifecycle/integration regression tests; production diff не меняет код сериализации и AMQP publish. Динамическая установка/обновление бинарника не выполнялись. Build-tree mod_amqp.so SHA-256 9409d73f085d2d15cfe4a45ce60c141247ef4946d5abc16ca5b0e0f981844aca; установленный модуль сохраняет ранее измеренный SHA-256 31b8dba5b522808a1bc95f07ccde8b332eaca9e4d2432899ec9d48bfbc583d1f.
++
++## Эксплуатационный контракт и следующие проверки
++
++При штатной работе разрешён api amqp для config reload; после него нужно проверить api amqp status. ACTIVE означает успешную активацию, DEGRADED допускает исправленный config reload, RESTART_REQUIRED требует перезапуска процесса и запрещает reload. Обновление бинарника планируется как остановка/запуск FreeSWITCH целиком с проверкой status и возможностью отката прежнего бинарника; до закрытия process-shutdown блокера этот порядок нельзя считать доказанно безопасным. Команда reload mod_amqp, обычный и forced unload должны возвращать отказ.
++
++Для снятия BLOCKED необходимы: (1) доказанный синхронный shutdown hook и отдельный Core-process probe с реальными producer/command/logging workers, контролируемым I/O и проверкой unbind→join→pool; (2) локализация integration ASan с воспроизводимым минимальным примером либо исправление обнаруженного lifetime defect и зелёный повторный прогон; (3) повторная аварийная loader/regression проверка после любого исправления. Надёжность доставки RabbitMQ в объём этого hardening не входит.
+diff --git a/docs/mod_amqp/hardening-artifacts/asan-core-apr-repro.c b/docs/mod_amqp/hardening-artifacts/asan-core-apr-repro.c
+new file mode 100644
+index 0000000000..f28aaf1458
+--- /dev/null
++++ b/docs/mod_amqp/hardening-artifacts/asan-core-apr-repro.c
+@@ -0,0 +1,59 @@
++/* Isolated ASan control: same FreeSWITCH Core/APR thread setup, no mod_amqp. */
++#include <switch.h>
++#include <stdio.h>
++
++static switch_mutex_t *control_mutex;
++static switch_thread_cond_t *control_cond;
++static int control_release;
++
++static void *SWITCH_THREAD_FUNC worker(switch_thread_t *thread, void *data)
++{
++	(void)data;
++	switch_mutex_lock(control_mutex);
++	while (!control_release) switch_thread_cond_wait(control_cond, control_mutex);
++	switch_mutex_unlock(control_mutex);
++	switch_thread_exit(thread, SWITCH_STATUS_SUCCESS);
++	return NULL;
++}
++
++int main(int argc, char **argv)
++{
++	switch_memory_pool_t *pool = NULL;
++	switch_threadattr_t *attr = NULL;
++	switch_thread_t *thread = NULL;
++	switch_status_t result;
++	const char *error = NULL;
++	int i;
++	SWITCH_GLOBAL_dirs.mod_dir = strdup(AMQP_REPRO_ROOT "/conf");
++	SWITCH_GLOBAL_dirs.conf_dir = strdup(AMQP_REPRO_ROOT "/../../../src/mod/event_handlers/mod_amqp/test/conf");
++	SWITCH_GLOBAL_dirs.log_dir = strdup(AMQP_REPRO_ROOT);
++	SWITCH_GLOBAL_dirs.run_dir = strdup(AMQP_REPRO_ROOT);
++	SWITCH_GLOBAL_dirs.db_dir = strdup(AMQP_REPRO_ROOT);
++	SWITCH_GLOBAL_dirs.data_dir = strdup(AMQP_REPRO_ROOT);
++	switch_core_set_globals();
++	if (switch_core_init_and_modload(SCF_LOG_DISABLE, SWITCH_TRUE, &error) != SWITCH_STATUS_SUCCESS) return 10;
++	fprintf(stderr, "core initialized\n");
++	if (argc > 1 && switch_loadable_module_load_module(argv[1],
++		"mod_amqp_api_reply_proxy", SWITCH_FALSE, &error) != SWITCH_STATUS_SUCCESS) return 18;
++	if (argc > 2 && switch_loadable_module_load_module(argv[2],
++		"mod_event_socket", SWITCH_TRUE, &error) != SWITCH_STATUS_SUCCESS) return 19;
++	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) return 11;
++	if (switch_mutex_init(&control_mutex, SWITCH_MUTEX_UNNESTED, pool) != SWITCH_STATUS_SUCCESS) return 20;
++	if (switch_thread_cond_create(&control_cond, pool) != SWITCH_STATUS_SUCCESS) return 21;
++	if (switch_threadattr_create(&attr, pool) != SWITCH_STATUS_SUCCESS) return 12;
++	if (switch_threadattr_stacksize_set(attr, SWITCH_THREAD_STACKSIZE) != SWITCH_STATUS_SUCCESS) return 13;
++	if (switch_threadattr_detach_set(attr, 0) != SWITCH_STATUS_SUCCESS) return 14;
++	for (i = 0; i < 100; i++) {
++		fprintf(stderr, "iteration %d\n", i);
++		control_release = 0;
++		if (switch_thread_create(&thread, attr, worker, NULL, pool) != SWITCH_STATUS_SUCCESS) return 15;
++		switch_mutex_lock(control_mutex);
++		control_release = 1;
++		switch_thread_cond_broadcast(control_cond);
++		switch_mutex_unlock(control_mutex);
++		if (switch_thread_join(&result, thread) != SWITCH_STATUS_SUCCESS) return 16;
++	}
++	switch_core_destroy_memory_pool(&pool);
++	fprintf(stderr, "workers joined\n");
++	return switch_core_destroy() == SWITCH_STATUS_SUCCESS ? 0 : 17;
++}
+diff --git a/docs/mod_amqp/hardening-artifacts/check-deps.sh b/docs/mod_amqp/hardening-artifacts/check-deps.sh
+new file mode 100644
+index 0000000000..0de6d4c8b5
+--- /dev/null
++++ b/docs/mod_amqp/hardening-artifacts/check-deps.sh
+@@ -0,0 +1,60 @@
++#!/bin/sh
++# Run inside the development container from the mod_amqp build directory.
++# Changes only mtimes of inputs; a trap restores them after every probe.
++set -eu
++artifact_dir=/usr/src/freeswitch/docs/mod_amqp/hardening-artifacts
++make_test() {
++	make -j2 "$1" \
++		mod_amqp_la_LIBADD='-L/usr/local/freeswitch/lib -lfreeswitch' \
++		mod_amqp_la_LDFLAGS='-avoid-version -module -no-undefined -shared -lrabbitmq -Wl,-z,defs -Wl,-rpath,/usr/local/freeswitch/lib' \
++		test_test_filter_engine_LDADD=/usr/local/freeswitch/lib/libfreeswitch.so \
++		test_test_filter_engine_LDFLAGS='-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib' \
++		test_test_producer_lifecycle_LDADD='/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq' \
++		test_test_producer_lifecycle_LDFLAGS='-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib' \
++		test_test_producer_integration_LDADD='/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq' \
++		test_test_producer_integration_LDFLAGS='-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib -ldl' \
++		CFLAGS='-O1 -g -Wall -Werror'
++}
++probe() {
++	name=$1 input=$2 target=$3 object=$4
++	ref="$artifact_dir/.mtime-$name"
++	log="$artifact_dir/dependency-$name.log"
++	touch -r "$input" "$ref"
++	before=$(sha256sum "$input" | cut -d' ' -f1)
++	trap 'touch -r "$ref" "$input"; rm -f "$ref"' EXIT HUP INT TERM
++	sleep 1
++	touch "$input"
++	make_test "$target" > "$log" 2>&1
++	if ! grep -F "  CC       $object" "$log" >/dev/null; then
++		cat "$log"; echo "missing recompile: $name" >&2; exit 1
++	fi
++	if ! grep -F '  CCLD     ' "$log" >/dev/null; then
++		cat "$log"; echo "missing relink: $name" >&2; exit 1
++	fi
++	touch -r "$ref" "$input"
++	rm -f "$ref"
++	trap - EXIT HUP INT TERM
++	after=$(sha256sum "$input" | cut -d' ' -f1)
++	[ "$before" = "$after" ] || { echo "content changed: $input" >&2; exit 1; }
++	echo "$name: rebuilt object and linked target; SHA-256 unchanged"
++}
++make_test test/test_filter_engine > "$artifact_dir/dependency-noop-before.log" 2>&1
++probe production-layout mod_amqp.h mod_amqp.la mod_amqp_la-mod_amqp_producer.lo
++probe engine mod_amqp_filter_parser.c test/test_filter_engine test/test_filter_engine-test_filter_engine.o
++probe lifecycle mod_amqp_producer.c test/test_producer_lifecycle test/test_producer_lifecycle-test_producer_lifecycle.o
++probe integration mod_amqp.c test/test_producer_integration test/test_producer_integration-test_producer_integration.o
++probe helper test/worker_loop_cases.h test/test_producer_integration test/test_producer_integration-test_producer_integration.o
++probe proxy test/api_reply_proxy.c test/mod_amqp_api_reply_proxy.la test/mod_amqp_api_reply_proxy_la-api_reply_proxy.lo
++make_test test/test_producer_integration > "$artifact_dir/dependency-proxy-consumer.log" 2>&1
++grep -F '  CCLD     test/test_producer_integration' "$artifact_dir/dependency-proxy-consumer.log" >/dev/null
++make_test test/test_filter_engine > "$artifact_dir/dependency-noop-engine.log" 2>&1
++make_test mod_amqp.la > "$artifact_dir/dependency-noop-module.log" 2>&1
++make_test test/test_producer_lifecycle > "$artifact_dir/dependency-noop-lifecycle.log" 2>&1
++make_test test/test_producer_integration > "$artifact_dir/dependency-noop-integration.log" 2>&1
++if grep -E '  (CC|CCLD) ' "$artifact_dir/dependency-noop-engine.log" \
++	"$artifact_dir/dependency-noop-module.log" \
++	"$artifact_dir/dependency-noop-lifecycle.log" \
++	"$artifact_dir/dependency-noop-integration.log" >/dev/null; then
++	echo 'unchanged tree unexpectedly rebuilt' >&2; exit 1
++fi
++echo 'unchanged tree: no compilation or linking'
+diff --git a/docs/mod_amqp/hardening-artifacts/commands.md b/docs/mod_amqp/hardening-artifacts/commands.md
+new file mode 100644
+index 0000000000..089ffe60f4
+--- /dev/null
++++ b/docs/mod_amqp/hardening-artifacts/commands.md
+@@ -0,0 +1,40 @@
++# Изолированные команды проверки hardening
++
++Все команды запускались в контейнере freeswitch-dev из /usr/src/freeswitch. Они не выполняют install, reload/unload работающего сервиса или изменение рабочего XML.
++
++~~~sh
++cd /usr/src/freeswitch/src/mod/event_handlers/mod_amqp
++make -j2 CFLAGS="-O1 -g -Wall -Werror" mod_amqp.la check \
++  mod_amqp_la_LIBADD="-L/usr/local/freeswitch/lib -lfreeswitch" \
++  mod_amqp_la_LDFLAGS="-avoid-version -module -no-undefined -shared -lrabbitmq -Wl,-z,defs -Wl,-rpath,/usr/local/freeswitch/lib" \
++  test_test_filter_engine_LDADD=/usr/local/freeswitch/lib/libfreeswitch.so \
++  test_test_filter_engine_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib" \
++  test_test_producer_lifecycle_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq" \
++  test_test_producer_lifecycle_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib" \
++  test_test_producer_integration_LDADD="/usr/local/freeswitch/lib/libfreeswitch.so -lrabbitmq" \
++  test_test_producer_integration_LDFLAGS="-no-undefined -Wl,-rpath,/usr/local/freeswitch/lib -ldl"
++~~~
++
++Exit 0; вывод: check-permanent-v2.log. Установленная libfreeswitch имеет SHA-256 85774d8dc221b300d12e342ccacf76ce397946bf2044d77cb7f2d232a72a2145.
++
++~~~sh
++cd /usr/src/freeswitch
++sh docs/mod_amqp/hardening-artifacts/check-deps.sh
++cd src/mod/event_handlers/mod_amqp
++MOD_AMQP_SANITIZER_TEST=test_filter_engine sh test/run_filter_engine_sanitizers.sh /usr/src/freeswitch/docs/mod_amqp/hardening-artifacts/sanitizers-engine-policy-final
++MOD_AMQP_SANITIZER_TEST=test_producer_integration sh test/run_filter_engine_sanitizers.sh /usr/src/freeswitch/docs/mod_amqp/hardening-artifacts/sanitizers-policy-final
++~~~
++
++Dependency probe exit 0. Engine sanitizer exit 0. Integration sanitizer exit 1 из-за ASan; TSan в том же прогоне прошёл.
++
++Изолированные loader probes выполнялись по одному в отдельных процессах после сборки harness/interposer с -Wall -Werror:
++
++~~~sh
++cd /usr/src/freeswitch
++for scenario in normal initial-clean initial-retained; do
++  LD_PRELOAD=docs/mod_amqp/hardening-artifacts/loader-fault-interposer.so \
++    timeout 45s docs/mod_amqp/hardening-artifacts/loader-fault-main "$scenario"
++done
++~~~
++
++Каждый сценарий exit 0; отдельные журналы loader-*-v3.log.
+diff --git a/docs/mod_amqp/hardening-artifacts/conf/freeswitch.xml b/docs/mod_amqp/hardening-artifacts/conf/freeswitch.xml
+new file mode 100644
+index 0000000000..d36d52ef32
+--- /dev/null
++++ b/docs/mod_amqp/hardening-artifacts/conf/freeswitch.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0"?>
++<document type="freeswitch/xml">
++  <section name="configuration">
++    <configuration name="modules.conf"><modules/></configuration>
++    <configuration name="timezones.conf"><timezones><zone name="GMT" value="GMT0"/></timezones></configuration>
++    <configuration name="amqp.conf">
++      <producers>
++        <profile name="acceptance-fault">
++          <params><param name="event_filter" value="DTMF,CUSTOM"/></params>
++        </profile>
++      </producers>
++      <commands/>
++      <logging/>
++    </configuration>
++  </section>
++</document>
+diff --git a/src/mod/event_handlers/mod_amqp/test/worker_loop_cases.h b/src/mod/event_handlers/mod_amqp/test/worker_loop_cases.h
+new file mode 100644
+index 0000000000..871176876a
+--- /dev/null
++++ b/src/mod/event_handlers/mod_amqp/test/worker_loop_cases.h
+@@ -0,0 +1,138 @@
++/* The real production worker entry points are used in every case below. */
++FST_TEST_BEGIN(command_and_logging_stop_during_blocked_open)
++{
++	int command;
++	for (command = 0; command <= 1; command++) {
++		worker_destroy_context_t context = {0};
++		switch_thread_t *destroyer = NULL;
++		switch_threadattr_t *attr = NULL;
++		switch_status_t joined;
++		worker_mode = WORKER_IO_BLOCK;
++		set_counter(&destroy_done, 0);
++		set_counter(&worker_io_entered, 0);
++		set_counter(&worker_release_io, 0);
++		fst_check(worker_create_profile(command ? SWITCH_TRUE : SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
++		context.command = command ? SWITCH_TRUE : SWITCH_FALSE;
++		context.profile = switch_core_hash_find(command ? mod_amqp_globals.command_hash :
++			mod_amqp_globals.logging_hash, "worker");
++		fst_check(context.profile && await_counter(&worker_io_entered, 1));
++		fst_check(worker_state_mutex_available(&context));
++		fst_check(switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) == SWITCH_STATUS_SUCCESS);
++		switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
++		fst_check(switch_threadattr_create(&attr, fst_pool) == SWITCH_STATUS_SUCCESS);
++		fst_check(switch_thread_create(&destroyer, attr, worker_destroy_thread, &context, fst_pool) == SWITCH_STATUS_SUCCESS);
++		fst_check(worker_stop_seen(&context));
++		fst_check(read_counter(&destroy_done) == 0);
++		set_counter(&worker_release_io, 1);
++		fst_check(switch_thread_join(&joined, destroyer) == SWITCH_STATUS_SUCCESS);
++		fst_check(context.status == SWITCH_STATUS_SUCCESS && context.profile == NULL);
++		fst_check(switch_core_hash_empty(command ? mod_amqp_globals.command_hash : mod_amqp_globals.logging_hash));
++		worker_mode = WORKER_IDLE;
++	}
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(worker_mutex_init_failure_cleans_partial_profile)
++{
++	fail_adjacent_mutex = 1;
++	fst_check(worker_create_profile(SWITCH_TRUE) == SWITCH_STATUS_GENERR);
++	fst_check(worker_create_profile(SWITCH_FALSE) == SWITCH_STATUS_GENERR);
++	fst_check(switch_core_hash_empty(mod_amqp_globals.command_hash));
++	fst_check(switch_core_hash_empty(mod_amqp_globals.logging_hash));
++	fail_adjacent_mutex = 0;
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(command_and_logging_stop_during_reconnect_wait)
++{
++	int command;
++	for (command = 0; command <= 1; command++) {
++		worker_destroy_context_t context = {0};
++		switch_thread_t *destroyer = NULL;
++		switch_threadattr_t *attr = NULL;
++		switch_status_t joined;
++		worker_mode = WORKER_SLEEP_BLOCK;
++		set_counter(&destroy_done, 0);
++		set_counter(&worker_sleep_entered, 0);
++		set_counter(&worker_release_sleep, 0);
++		fst_check(worker_create_profile(command ? SWITCH_TRUE : SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
++		context.command = command ? SWITCH_TRUE : SWITCH_FALSE;
++		context.profile = switch_core_hash_find(command ? mod_amqp_globals.command_hash :
++			mod_amqp_globals.logging_hash, "worker");
++		fst_check(context.profile && await_counter(&worker_sleep_entered, 1));
++		fst_check(worker_state_mutex_available(&context));
++		fst_check(switch_threadattr_create(&attr, fst_pool) == SWITCH_STATUS_SUCCESS);
++		fst_check(switch_thread_create(&destroyer, attr, worker_destroy_thread, &context, fst_pool) == SWITCH_STATUS_SUCCESS);
++		fst_check(worker_stop_seen(&context));
++		fst_check(read_counter(&destroy_done) == 0);
++		set_counter(&worker_release_sleep, 1);
++		fst_check(switch_thread_join(&joined, destroyer) == SWITCH_STATUS_SUCCESS);
++		fst_check(context.status == SWITCH_STATUS_SUCCESS && context.profile == NULL);
++		worker_mode = WORKER_IDLE;
++	}
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(logging_stop_during_queue_wait)
++{
++	worker_destroy_context_t context = {0};
++	switch_thread_t *destroyer = NULL;
++	switch_threadattr_t *attr = NULL;
++	switch_status_t joined;
++	worker_mode = WORKER_QUEUE_WAIT;
++	set_counter(&destroy_done, 0);
++	set_counter(&worker_queue_entered, 0);
++	set_counter(&worker_release_queue, 0);
++	fst_check(worker_create_profile(SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
++	context.profile = switch_core_hash_find(mod_amqp_globals.logging_hash, "worker");
++	fst_check(context.profile && await_counter(&worker_queue_entered, 1));
++	fst_check(worker_state_mutex_available(&context));
++	fst_check(switch_threadattr_create(&attr, fst_pool) == SWITCH_STATUS_SUCCESS);
++	fst_check(switch_thread_create(&destroyer, attr, worker_destroy_thread, &context, fst_pool) == SWITCH_STATUS_SUCCESS);
++	fst_check(worker_stop_seen(&context));
++	fst_check(read_counter(&destroy_done) == 0);
++	set_counter(&worker_release_queue, 1);
++	fst_check(switch_thread_join(&joined, destroyer) == SWITCH_STATUS_SUCCESS);
++	fst_check(context.status == SWITCH_STATUS_SUCCESS && context.profile == NULL);
++	worker_mode = WORKER_IDLE;
++}
++FST_TEST_END()
++
++FST_TEST_BEGIN(worker_failed_join_retains_owner_for_retry)
++{
++	int command;
++	for (command = 0; command <= 1; command++) {
++		worker_destroy_context_t context = {0};
++		worker_mode = WORKER_IO_BLOCK;
++		set_counter(&worker_io_entered, 0);
++		set_counter(&worker_release_io, 0);
++		fst_check(worker_create_profile(command ? SWITCH_TRUE : SWITCH_FALSE) == SWITCH_STATUS_SUCCESS);
++		context.command = command ? SWITCH_TRUE : SWITCH_FALSE;
++		context.profile = switch_core_hash_find(command ? mod_amqp_globals.command_hash :
++			mod_amqp_globals.logging_hash, "worker");
++		fst_check(context.profile && await_counter(&worker_io_entered, 1));
++		fail_join = 1;
++		if (command) {
++			mod_amqp_command_profile_t *profile = context.profile;
++			fst_check(mod_amqp_command_destroy(&profile) == SWITCH_STATUS_GENERR);
++			fst_check(profile == context.profile);
++		} else {
++			mod_amqp_logging_profile_t *profile = context.profile;
++			fst_check(mod_amqp_logging_destroy(&profile) == SWITCH_STATUS_GENERR);
++			fst_check(profile == context.profile);
++		}
++		fst_check(switch_core_hash_find(command ? mod_amqp_globals.command_hash :
++			mod_amqp_globals.logging_hash, "worker") == context.profile);
++		set_counter(&worker_release_io, 1);
++		if (command) {
++			mod_amqp_command_profile_t *profile = context.profile;
++			fst_check(mod_amqp_command_destroy(&profile) == SWITCH_STATUS_SUCCESS && profile == NULL);
++		} else {
++			mod_amqp_logging_profile_t *profile = context.profile;
++			fst_check(mod_amqp_logging_destroy(&profile) == SWITCH_STATUS_SUCCESS && profile == NULL);
++		}
++		fst_check(switch_core_hash_empty(command ? mod_amqp_globals.command_hash : mod_amqp_globals.logging_hash));
++		worker_mode = WORKER_IDLE;
++	}
++}
++FST_TEST_END()
+diff --git a/src/mod/event_handlers/mod_amqp/test/worker_loop_helpers.h b/src/mod/event_handlers/mod_amqp/test/worker_loop_helpers.h
+new file mode 100644
+index 0000000000..82b2c71fc9
+--- /dev/null
++++ b/src/mod/event_handlers/mod_amqp/test/worker_loop_helpers.h
+@@ -0,0 +1,115 @@
++/* Production command/logging loops with deterministic network/queue wrappers.
++ * Included only by the isolated integration executable. */
++
++static switch_status_t integration_connection_open(mod_amqp_connection_t *connections,
++	mod_amqp_connection_t **active, char *name, char *custom_attr)
++{
++	(void)connections; (void)active; (void)name; (void)custom_attr;
++	switch_mutex_lock(test_mutex);
++	worker_io_entered++;
++	switch_thread_cond_broadcast(test_cond);
++	while (worker_mode == WORKER_IO_BLOCK && !worker_release_io) {
++		switch_thread_cond_wait(test_cond, test_mutex);
++	}
++	switch_mutex_unlock(test_mutex);
++	return SWITCH_STATUS_GENERR;
++}
++
++static switch_status_t integration_adjacent_mutex_init(switch_mutex_t **mutex,
++	unsigned int flags, switch_memory_pool_t *pool)
++{
++	if (fail_adjacent_mutex) {
++		*mutex = (switch_mutex_t *)pool;
++		return SWITCH_STATUS_GENERR;
++	}
++	return switch_mutex_init(mutex, flags, pool);
++}
++
++static void integration_worker_sleep(switch_interval_time_t interval)
++{
++	(void)interval;
++	switch_mutex_lock(test_mutex);
++	worker_sleep_entered++;
++	switch_thread_cond_broadcast(test_cond);
++	while (worker_mode == WORKER_SLEEP_BLOCK && !worker_release_sleep) {
++		switch_thread_cond_wait(test_cond, test_mutex);
++	}
++	switch_mutex_unlock(test_mutex);
++	/* Bound the synthetic reconnect loop without masking its stop check. */
++	switch_sleep(1000);
++}
++
++static switch_status_t integration_queue_pop_timeout(switch_queue_t *queue, void **data,
++	switch_interval_time_t timeout)
++{
++	(void)queue; (void)data; (void)timeout;
++	switch_mutex_lock(test_mutex);
++	worker_queue_entered++;
++	switch_thread_cond_broadcast(test_cond);
++	while (!worker_release_queue) {
++		switch_thread_cond_wait(test_cond, test_mutex);
++	}
++	switch_mutex_unlock(test_mutex);
++	return SWITCH_STATUS_TIMEOUT;
++}
++
++static switch_status_t worker_create_profile(switch_bool_t command)
++{
++	switch_xml_t xml = switch_xml_parse_str_dynamic("<profile/>", SWITCH_TRUE);
++	switch_status_t status;
++	switch_assert(xml);
++	switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);
++	status = command ? mod_amqp_command_create("worker", xml) : mod_amqp_logging_create("worker", xml);
++	switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
++	switch_xml_free(xml);
++	return status;
++}
++
++typedef struct {
++	switch_bool_t command;
++	void *profile;
++	switch_status_t status;
++} worker_destroy_context_t;
++
++static void *SWITCH_THREAD_FUNC worker_destroy_thread(switch_thread_t *thread, void *data)
++{
++	worker_destroy_context_t *context = data;
++	switch_mutex_lock(mod_amqp_globals.lifecycle_mutex);
++	if (context->command) {
++		mod_amqp_command_profile_t *profile = context->profile;
++		context->status = mod_amqp_command_destroy(&profile);
++		context->profile = profile;
++	} else {
++		mod_amqp_logging_profile_t *profile = context->profile;
++		context->status = mod_amqp_logging_destroy(&profile);
++		context->profile = profile;
++	}
++	switch_mutex_unlock(mod_amqp_globals.lifecycle_mutex);
++	set_counter(&destroy_done, 1);
++	switch_thread_exit(thread, SWITCH_STATUS_SUCCESS);
++	return NULL;
++}
++
++static switch_bool_t worker_stop_seen(worker_destroy_context_t *context)
++{
++	switch_time_t deadline = switch_time_now() + 3000000;
++	while (switch_time_now() < deadline) {
++		if (context->command) {
++			if (!mod_amqp_command_is_running(context->profile)) return SWITCH_TRUE;
++		} else if (!mod_amqp_logging_is_running(context->profile)) {
++			return SWITCH_TRUE;
++		}
++		switch_sleep(1000);
++	}
++	return SWITCH_FALSE;
++}
++
++static switch_bool_t worker_state_mutex_available(worker_destroy_context_t *context)
++{
++	switch_mutex_t *mutex = context->command ?
++		((mod_amqp_command_profile_t *)context->profile)->mutex :
++		((mod_amqp_logging_profile_t *)context->profile)->mutex;
++	if (switch_mutex_trylock(mutex) != SWITCH_STATUS_SUCCESS) return SWITCH_FALSE;
++	switch_mutex_unlock(mutex);
++	return SWITCH_TRUE;
++}

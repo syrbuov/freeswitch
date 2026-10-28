@@ -1,0 +1,2 @@
+address,undefined: FAIL, exit 1 (/usr/src/freeswitch/docs/mod_amqp/hardening-artifacts/sanitizers-policy-v2/test_producer_integration_address,undefined.log)
+thread: PASS (/usr/src/freeswitch/docs/mod_amqp/hardening-artifacts/sanitizers-policy-v2/test_producer_integration_thread.log)

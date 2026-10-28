@@ -210,10 +210,20 @@ typedef struct {
   switch_memory_pool_t *pool;
 } mod_amqp_logging_profile_t;
 
+typedef enum {
+  MOD_AMQP_HEALTH_ACTIVE,
+  MOD_AMQP_HEALTH_DEGRADED,
+  MOD_AMQP_HEALTH_RESTART_REQUIRED
+} mod_amqp_health_t;
+
 typedef struct mod_amqp_globals_s {
   switch_memory_pool_t *pool;
   /* Management only: never acquired by producer callbacks or sender threads. */
   switch_mutex_t *lifecycle_mutex;
+  /* Status API never waits for lifecycle teardown. Protects health and detail. */
+  switch_mutex_t *health_mutex;
+  mod_amqp_health_t health;
+  const char *health_detail; /* Static, credential-free diagnostic text. */
   switch_bool_t shutting_down;
   switch_bool_t logging_bound;
 
@@ -226,6 +236,8 @@ extern mod_amqp_globals_t mod_amqp_globals;
 
 /* utils */
 switch_status_t mod_amqp_do_config(switch_bool_t reload);
+void mod_amqp_health_set(mod_amqp_health_t state, const char *detail);
+void mod_amqp_health_note(const char *detail);
 switch_bool_t mod_amqp_is_command_thread(void);
 int mod_amqp_log_if_amqp_error(amqp_rpc_reply_t x, char const *context);
 int mod_amqp_count_chars(const char* string, char ch);

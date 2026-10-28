@@ -38,6 +38,24 @@
 
 #include "mod_amqp.h"
 
+/* Shared only by the manager and sender. Keep lock scope outside queue and
+ * AMQP calls; a blocked I/O call may still delay the subsequent join. */
+static void mod_amqp_logging_set_running(mod_amqp_logging_profile_t *profile, switch_bool_t running)
+{
+	switch_mutex_lock(profile->mutex);
+	profile->running = running;
+	switch_mutex_unlock(profile->mutex);
+}
+
+static switch_bool_t mod_amqp_logging_is_running(mod_amqp_logging_profile_t *profile)
+{
+	switch_bool_t running;
+	switch_mutex_lock(profile->mutex);
+	running = profile->running;
+	switch_mutex_unlock(profile->mutex);
+	return running;
+}
+
 switch_status_t mod_amqp_logging_recv(const switch_log_node_t *node, switch_log_level_t level)
 {
 	switch_hash_index_t *hi = NULL;
@@ -124,7 +142,9 @@ switch_status_t mod_amqp_logging_destroy(mod_amqp_logging_profile_t **prof)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] shutting down...\n", profile->name);
 	}
 
-	profile->running = 0;
+	if (profile->mutex) {
+		mod_amqp_logging_set_running(profile, SWITCH_FALSE);
+	} /* A failed mutex init cannot have started a worker. */
 
 	if (profile->logging_thread) {
 		if (switch_thread_join(&status, profile->logging_thread) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
@@ -178,7 +198,11 @@ switch_status_t mod_amqp_logging_create(char *name, switch_xml_t cfg)
 	profile = switch_core_alloc(pool, sizeof(mod_amqp_logging_profile_t));
 	profile->pool = pool;
 	profile->name = switch_core_strdup(profile->pool, name);
-	profile->running = 1;
+	if (switch_mutex_init(&profile->mutex, SWITCH_MUTEX_NESTED, pool) != SWITCH_STATUS_SUCCESS) {
+		profile->mutex = NULL;
+		goto err;
+	}
+	mod_amqp_logging_set_running(profile, SWITCH_TRUE);
 	profile->conn_root   = NULL;
 	profile->conn_active = NULL;
 	profile->log_level_mask = 0;
@@ -328,7 +352,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void 
   amqp_boolean_t passive = 0;
   amqp_boolean_t durable = 1;
 
-  while (profile->running) {
+  while (mod_amqp_logging_is_running(profile)) {
     if (!profile->conn_active) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");
 

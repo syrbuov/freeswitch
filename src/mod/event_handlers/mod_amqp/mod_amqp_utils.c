@@ -178,20 +178,30 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 	switch_status_t status = SWITCH_STATUS_GENERR;
 	amqp_prepared_item_t *prepared = NULL, *item;
 	switch_hash_index_t *hi = NULL;
+	switch_bool_t change_started = SWITCH_FALSE;
+	switch_bool_t preparation_failed = SWITCH_FALSE;
 
 	/* Never wait: teardown may be joining an AMQP command worker calling us. */
 	if (switch_mutex_trylock(mod_amqp_globals.lifecycle_mutex) != SWITCH_STATUS_SUCCESS) return SWITCH_STATUS_GENERR;
 	if (mod_amqp_globals.shutting_down || (reload && mod_amqp_is_command_thread())) goto done;
-	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) goto done;
+	if (!(xml = switch_xml_open_cfg("amqp.conf", &cfg, NULL))) {
+		preparation_failed = SWITCH_TRUE;
+		goto done;
+	}
 	/* This uses the existing XML snapshot. It does not invoke reloadxml. */
-	if (amqp_prepare_set(cfg, &prepared) != SWITCH_STATUS_SUCCESS) goto done;
+	if (amqp_prepare_set(cfg, &prepared) != SWITCH_STATUS_SUCCESS) {
+		preparation_failed = SWITCH_TRUE;
+		goto done;
+	}
 
 	if (reload) {
 		/* No new bindings until ALL old producers have been destroyed. */
+		change_started = SWITCH_TRUE;
 		if (amqp_destroy_producers(SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) goto done;
 	} else if (!switch_core_hash_empty(mod_amqp_globals.producer_hash)) {
 		goto done;
 	}
+	change_started = SWITCH_TRUE;
 	for (item = prepared; item; item = item->next) {
 		if (mod_amqp_producer_activate(item->prepared) != SWITCH_STATUS_SUCCESS) {
 			/* No rollback of the old set. Cleanup includes the failed owner. */
@@ -239,6 +249,15 @@ restore_logger:
 		} else status = SWITCH_STATUS_GENERR;
 	}
 done:
+	if (status == SWITCH_STATUS_SUCCESS) {
+		mod_amqp_health_set(MOD_AMQP_HEALTH_ACTIVE, "configuration active");
+	} else if (change_started) {
+		mod_amqp_health_set(MOD_AMQP_HEALTH_DEGRADED,
+			"configuration switch failed after teardown began; retry config reload or restart");
+	} else if (preparation_failed) {
+		/* Whatever runtime state existed before preparation remains unchanged. */
+		mod_amqp_health_note("configuration preparation failed; existing runtime set unchanged");
+	}
 	switch_safe_free(hi);
 	amqp_prepared_set_destroy(&prepared);
 	if (xml) switch_xml_free(xml);

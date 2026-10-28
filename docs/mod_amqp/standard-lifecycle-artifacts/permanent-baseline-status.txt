@@ -1,0 +1,39 @@
+## codex/mod-amqp-filter-engine-stage3
+ M src/mod/event_handlers/mod_amqp/Makefile.am
+ M src/mod/event_handlers/mod_amqp/mod_amqp.c
+ M src/mod/event_handlers/mod_amqp/mod_amqp.h
+ M src/mod/event_handlers/mod_amqp/mod_amqp_command.c
+ M src/mod/event_handlers/mod_amqp/mod_amqp_logging.c
+ M src/mod/event_handlers/mod_amqp/mod_amqp_utils.c
+ M src/mod/event_handlers/mod_amqp/test/api_reply_cases.h
+ M src/mod/event_handlers/mod_amqp/test/api_reply_helpers.h
+ M src/mod/event_handlers/mod_amqp/test/producer_integration_helpers.h
+ M src/mod/event_handlers/mod_amqp/test/run_filter_engine_sanitizers.sh
+ M src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle.c
+?? .vscode/tasks.json
+?? build/.cmake/
+?? build/CMakeCache.txt
+?? build/CMakeFiles/
+?? build/build.ninja
+?? build/cmake_install.cmake
+?? build/compile_commands.json
+?? docs/mod_amqp/acceptance-artifacts/
+?? docs/mod_amqp/filter-engine-acceptance.md
+?? docs/mod_amqp/filter-engine-hardening.md
+?? docs/mod_amqp/hardening-artifacts/
+?? docs/mod_amqp/standard-lifecycle-artifacts/
+?? src/mod/applications/mod_example/
+?? src/mod/asr_tts/mod_unimrcp/
+?? src/mod/asr_tts/mod_vosk/
+?? src/mod/codecs/mod_amr/test/test_amr
+?? src/mod/endpoints/mod_wsbridge/
+?? src/mod/event_handlers/mod_amqp/test/adoption-token.dat
+?? src/mod/event_handlers/mod_amqp/test/test_filter_engine
+?? src/mod/event_handlers/mod_amqp/test/test_producer_integration
+?? src/mod/event_handlers/mod_amqp/test/test_producer_lifecycle
+?? src/mod/event_handlers/mod_amqp/test/worker_loop_cases.h
+?? src/mod/event_handlers/mod_amqp/test/worker_loop_helpers.h
+?? src/mod/event_handlers/mod_event_grpc/
+?? tests/unit/switch_core_asr
+?? tests/unit/switch_sip
+?? tests/unit/test_tts_format

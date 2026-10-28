@@ -48,7 +48,7 @@ static int api_reply_send(int fd, const char *command)
 	return 0;
 }
 
-static int api_reply_request(char *reply, size_t capacity)
+static int api_reply_request_command(const char *api_command, char *reply, size_t capacity)
 {
 	struct sockaddr_in address;
 	char greeting[1024], auth[1024];
@@ -76,10 +76,15 @@ static int api_reply_request(char *reply, size_t capacity)
 	if (api_reply_send(fd, "auth " AMQP_API_REPLY_TEST_PASSWORD "\n\n") != 0 ||
 		api_reply_read_packet(fd, auth, sizeof(auth)) != 0 ||
 		!strstr(auth, "Reply-Text: +OK")) goto done;
-	if (api_reply_send(fd, "api amqp\n\n") != 0 ||
+	if (api_reply_send(fd, api_command) != 0 ||
 		api_reply_read_packet(fd, reply, capacity) != 0) goto done;
 	status = 0;
 done:
 	close(fd);
 	return status;
+}
+
+static int api_reply_request(char *reply, size_t capacity)
+{
+	return api_reply_request_command("api amqp\n\n", reply, capacity);
 }
